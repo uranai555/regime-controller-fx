@@ -1,8 +1,11 @@
 """types.py — RegimeController のデータ型定義
 
-Phase 1 ではルールベースの cb_run_score + persistence filter で
-レジーム判定を行う。このモジュールには全てのデータクラスと enum を
-集約し、他モジュール間の依存を types.py だけに閉じる。
+Phase 1: ルールベースの cb_run_score + persistence filter
+Phase 2: HMM (GaussianHMM) によるレジーム分類
+Phase 3: ブローカー別 Execution Quality Model
+
+このモジュールには全てのデータクラスと enum を集約し、
+他モジュール間の依存を types.py だけに閉じる。
 """
 
 from dataclasses import dataclass, field
@@ -89,6 +92,23 @@ class RegimeFeatures:
 
     # ── Existing v3 Layer 3 Output ──
     existing_layer3_regime: Optional[str] = None
+
+    # ── Phase 2: HMM Regime ──
+    hmm_regime_state: Optional[str] = None       # HMMRegimeState value
+    hmm_regime_probabilities: Optional[Dict[str, float]] = None
+    hmm_log_likelihood: Optional[float] = None
+
+    # ── Phase 3: Broker Quality ──
+    broker_id: Optional[str] = None
+    broker_quality_score: Optional[float] = None
+    broker_slippage_mean: Optional[float] = None
+    broker_slippage_p95: Optional[float] = None
+    broker_latency_p95_ms: Optional[float] = None
+    broker_reject_rate: Optional[float] = None
+    broker_fill_rate: Optional[float] = None
+    broker_requote_rate: Optional[float] = None
+    broker_spread_markup: Optional[float] = None
+    broker_hourly_quality_factor: Optional[float] = None
 
     # ── 欠損追跡 ──
     missing_fields: List[str] = field(default_factory=list)

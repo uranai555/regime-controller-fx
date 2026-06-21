@@ -75,6 +75,18 @@ class RegimeVaultLogger:
                 "missing_fields": decision.missing_fields,
             }
 
+            # Phase 2: HMM regime (if present in features)
+            if "hmm_regime_state" in decision.features:
+                record["hmm_regime_state"] = decision.features["hmm_regime_state"]
+            if "hmm_regime_probabilities" in decision.features:
+                record["hmm_regime_probabilities"] = decision.features["hmm_regime_probabilities"]
+
+            # Phase 3: Broker quality (if present in features)
+            if "broker_id" in decision.features:
+                record["broker_id"] = decision.features["broker_id"]
+            if "broker_quality_score" in decision.features:
+                record["broker_quality_score"] = decision.features["broker_quality_score"]
+
             with path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 

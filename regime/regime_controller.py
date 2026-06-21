@@ -1,7 +1,11 @@
 """regime_controller.py — RegimeController オーケストレーター
 
-FeatureCollector → SubScoreCalculator → raw_mode → PersistenceFilter
+FeatureCollector → [HMM + BrokerModel] → SubScoreCalculator → raw_mode → PersistenceFilter
 のパイプラインを統括する。出力は BUY/SELL ではなく戦略許可/禁止。
+
+Phase 1: ルールベース cb_run_score
+Phase 2: HMM レジーム分類統合
+Phase 3: ブローカー別 Execution Quality Model 統合
 """
 
 import dataclasses
@@ -15,6 +19,8 @@ from regime.feature_collector import FeatureCollector
 from regime.persistence_filter import PersistenceFilter
 from regime.sub_scores import ScoreConfig, SubScoreCalculator
 from regime.types import RegimeDecision, RegimeFeatures, RegimeMode
+from regime.hmm_regime import HMMRegimeClassifier, HMMConfig, HMMResult
+from regime.broker_model import BrokerQualityModel, BrokerModelConfig, ExecutionEvent
 
 from regime.sub_scores import (
     RC_SPREAD_TOO_WIDE,
@@ -36,15 +42,17 @@ class RegimeControllerConfig:
     enabled: bool = True
     confirm_bars: int = 3
 
-    # 重み
+    # 重み (Phase 2/3 対応: HMM + broker_quality 追加)
     score_weights: Dict[str, float] = field(default_factory=lambda: {
-        "volatility_score": 0.18,
-        "trend_safety_score": 0.18,
+        "volatility_score": 0.15,
+        "trend_safety_score": 0.10,
         "spread_score": 0.18,
         "event_safety_score": 0.13,
         "inventory_score": 0.13,
-        "execution_score": 0.10,
-        "cb_efficiency_score": 0.10,
+        "execution_score": 0.08,
+        "cb_efficiency_score": 0.08,
+        "hmm_regime_score": 0.08,
+        "broker_quality_score": 0.07,
     })
 
     # モード閾値
@@ -66,11 +74,19 @@ class RegimeControllerConfig:
         RegimeMode.FORCE_EXIT.value: 0.0,
     })
 
+    # Phase 2: HMM
+    hmm_config: HMMConfig = field(default_factory=HMMConfig)
+
+    # Phase 3: Broker Quality Model
+    broker_model_config: BrokerModelConfig = field(default_factory=BrokerModelConfig)
+
 
 class RegimeController:
     """レジーム判定 → 戦略許可/禁止の上位フィルター。
 
-    Phase 1 ではルールベース（HMMなし / 各バー評価）。
+    Phase 1: ルールベース cb_run_score
+    Phase 2: HMM レジーム分類
+    Phase 3: ブローカー別 Execution Quality Model
     """
 
     def __init__(
@@ -84,6 +100,10 @@ class RegimeController:
         self.persistence_filter = PersistenceFilter(
             confirm_bars=self.config.confirm_bars
         )
+        # Phase 2: HMM
+        self.hmm_classifier = HMMRegimeClassifier(self.config.hmm_config)
+        # Phase 3: Broker Quality Model
+        self.broker_model = BrokerQualityModel(self.config.broker_model_config)
 
     def evaluate(
         self,
@@ -97,8 +117,9 @@ class RegimeController:
         cb_config: Optional[Dict[str, Any]] = None,
         current_time_ms: Optional[int] = None,
         minutes_to_high_impact_event: Optional[int] = None,
+        broker_id: Optional[str] = None,
     ) -> RegimeDecision:
-        """FeatureCollector → SubScoreCalculator → raw_mode → PersistenceFilter を実行する。
+        """FeatureCollector → [HMM + BrokerModel] → SubScoreCalculator → raw_mode → PersistenceFilter
 
         config.enabled=False の場合は常に NORMAL を返す（旧挙動との互換性）。
         """
@@ -120,7 +141,13 @@ class RegimeController:
             minutes_to_high_impact_event=minutes_to_high_impact_event,
         )
 
-        # 2. サブスコア計算
+        # 2. Phase 2: HMM レジーム分類
+        self._apply_hmm(features, bars)
+
+        # 3. Phase 3: ブローカー品質モデル
+        self._apply_broker_model(features, broker_id)
+
+        # 4. サブスコア計算
         sub_scores, reason_codes = self.scorer.calculate(features)
         cb_run_score = self.scorer.aggregate(sub_scores, self.config.score_weights)
         logger.debug(
@@ -128,10 +155,10 @@ class RegimeController:
             symbol, sub_scores, cb_run_score, features.missing_fields,
         )
 
-        # 3. raw_mode 判定
+        # 5. raw_mode 判定
         raw_mode = self._decide_raw_mode(features, sub_scores, cb_run_score, reason_codes)
 
-        # 4. Persistence filter
+        # 6. Persistence filter
         confirmed_mode = self.persistence_filter.update(raw_mode)
         if confirmed_mode != raw_mode:
             logger.info(
@@ -139,7 +166,7 @@ class RegimeController:
                 symbol, raw_mode.value, confirmed_mode.value,
             )
 
-        # 5. RegimeDecision に変換
+        # 7. RegimeDecision に変換
         return self._build_decision(
             mode=confirmed_mode,
             raw_mode=raw_mode,
@@ -148,6 +175,21 @@ class RegimeController:
             reason_codes=reason_codes,
             features=features,
         )
+
+    def fit_hmm(self, bars: List[Dict[str, Any]]) -> bool:
+        """HMM モデルを学習する。
+
+        充分なバーデータ（200本以上）で呼び出す。
+        バックテスト開始時や定期的な再学習に使用。
+        """
+        return self.hmm_classifier.fit(bars)
+
+    def update_broker_profile(self, event: ExecutionEvent) -> None:
+        """ブローカープロファイルを更新する。
+
+        各約定イベントごとに呼び出す。
+        """
+        self.broker_model.update(event)
 
     def _decide_raw_mode(
         self,
@@ -234,6 +276,49 @@ class RegimeController:
     def reset(self) -> None:
         """内部状態をリセット（新規バックテスト開始時など）。"""
         self.persistence_filter.reset(RegimeMode.NORMAL)
+
+    # ── Phase 2/3 integration ──
+
+    def _apply_hmm(
+        self,
+        features: RegimeFeatures,
+        bars: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        """HMM 分類結果を features にセットする。"""
+        if not self.hmm_classifier.available or bars is None:
+            return
+
+        result = self.hmm_classifier.predict(bars)
+        if result is not None:
+            features.hmm_regime_state = result.state.value
+            features.hmm_regime_probabilities = result.probabilities
+            features.hmm_log_likelihood = result.log_likelihood
+
+    def _apply_broker_model(
+        self,
+        features: RegimeFeatures,
+        broker_id: Optional[str],
+    ) -> None:
+        """ブローカー品質スコアを features にセットする。"""
+        if not self.broker_model.enabled or broker_id is None:
+            return
+
+        features.broker_id = broker_id
+        score, _reasons = self.broker_model.score(broker_id, hour=features.hour)
+        features.broker_quality_score = score
+
+        # プロファイルから詳細メトリクスを転記
+        profile = self.broker_model.get_profile(broker_id)
+        if profile is not None:
+            features.broker_slippage_mean = profile.slippage_mean
+            features.broker_slippage_p95 = profile.slippage_p95
+            features.broker_latency_p95_ms = profile.latency_p95_ms
+            features.broker_reject_rate = profile.reject_rate
+            features.broker_fill_rate = profile.fill_rate
+            features.broker_requote_rate = profile.requote_rate
+            features.broker_spread_markup = profile.spread_markup
+            if features.hour is not None and features.hour in profile.hourly_quality:
+                features.broker_hourly_quality_factor = profile.hourly_quality[features.hour]
 
     def _disabled_decision(
         self, symbol: str, current_time_ms: Optional[int]
