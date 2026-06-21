@@ -50,6 +50,9 @@ class FeatureCollector:
         cb_config: Optional[Dict[str, Any]] = None,
         current_time_ms: Optional[int] = None,
         minutes_to_high_impact_event: Optional[int] = None,
+        broker_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+        server_name: Optional[str] = None,
     ) -> RegimeFeatures:
         """dict ベースの入力から RegimeFeatures を組み立てる。
 
@@ -93,6 +96,12 @@ class FeatureCollector:
 
         # ── Layer 3 ──
         features.existing_layer3_regime = existing_layer3_regime
+
+        # ── Phase 2: Time-series features (HMM input) ──
+        self._collect_time_series(bars, features, missing)
+
+        # ── Phase 3: Broker / Account identification ──
+        self._collect_broker_info(broker_id, account_id, server_name, features, missing)
 
         features.missing_fields = missing
         return features
@@ -301,6 +310,67 @@ class FeatureCollector:
                 missing.append("rebate_per_lot_missing")
             if features.cost_per_lot is None:
                 missing.append("cost_per_lot_missing")
+
+    def _collect_time_series(
+        self,
+        bars: List[Dict[str, Any]],
+        features: RegimeFeatures,
+        missing: List[str],
+    ) -> None:
+        """Phase 2: bars から HMM 入力用の時系列特徴量を抽出する。"""
+        if len(bars) < 2:
+            missing.append("time_series_insufficient_bars")
+            return
+
+        # returns (log returns)
+        returns: List[float] = []
+        for i in range(1, len(bars)):
+            prev_c = bars[i - 1].get("close", 1.0)
+            curr_c = bars[i].get("close", 1.0)
+            if prev_c > 0:
+                returns.append(math.log(curr_c / prev_c))
+        if returns:
+            features.returns_series = returns
+
+        # rolling volatility (5-bar window std of returns)
+        if len(returns) >= 5:
+            vol_series: List[float] = []
+            for i in range(4, len(returns)):
+                window = returns[i - 4 : i + 1]
+                mean_r = sum(window) / len(window)
+                var = sum((r - mean_r) ** 2 for r in window) / len(window)
+                vol_series.append(math.sqrt(var))
+            features.volatility_series = vol_series
+
+        # spread series
+        spread_vals = [
+            b.get("spread_avg", 0.0) for b in bars
+            if b.get("spread_avg") is not None
+        ]
+        if spread_vals:
+            features.spread_series = spread_vals
+
+        # volume series
+        vol_vals = [
+            b.get("tick_volume", b.get("volume", 0.0)) for b in bars
+        ]
+        if any(v > 0 for v in vol_vals):
+            features.volume_series = vol_vals
+
+    @staticmethod
+    def _collect_broker_info(
+        broker_id: Optional[str],
+        account_id: Optional[str],
+        server_name: Optional[str],
+        features: RegimeFeatures,
+        missing: List[str],
+    ) -> None:
+        """Phase 3: ブローカー/口座識別子を RegimeFeatures に設定する。"""
+        features.broker_id = broker_id
+        features.account_id = account_id
+        features.server_name = server_name
+        if broker_id is None:
+            missing.append("broker_id_not_provided")
 
     @staticmethod
     def _now_iso(current_time_ms: Optional[int]) -> str:

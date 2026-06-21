@@ -7,6 +7,8 @@ from regime.sub_scores import SubScoreCalculator, ScoreConfig, RC_SPREAD_WIDENIN
 from regime.persistence_filter import PersistenceFilter
 from regime.regime_controller import RegimeController, RegimeControllerConfig
 from regime.feature_collector import FeatureCollector
+from regime.hmm_model import HMMModel, HMMConfig, GaussianHMM
+from regime.execution_quality_model import ExecutionQualityModel, ExecutionQualityConfig
 
 
 class TestRegimeModeRiskLevel(unittest.TestCase):
@@ -416,6 +418,398 @@ class TestFeaturesToDictIntrospection(unittest.TestCase):
         self.assertNotIn("symbol", decision.features)
         self.assertNotIn("timestamp", decision.features)
         self.assertNotIn("missing_fields", decision.features)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 2: HMM Model Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestGaussianHMM(unittest.TestCase):
+    """GaussianHMM の EM + Viterbi が動作すること。"""
+
+    def _make_synthetic_data(self, n_samples: int = 100) -> list:
+        """3状態の合成データを生成する。"""
+        import random
+        rng = random.Random(42)
+        data = []
+        for i in range(n_samples):
+            if i < n_samples // 3:
+                # state 0: low vol
+                data.append([rng.gauss(0.0, 0.01), rng.gauss(0.005, 0.002), rng.gauss(0.3, 0.05)])
+            elif i < 2 * n_samples // 3:
+                # state 1: mid vol
+                data.append([rng.gauss(0.0, 0.03), rng.gauss(0.02, 0.005), rng.gauss(0.5, 0.1)])
+            else:
+                # state 2: high vol
+                data.append([rng.gauss(0.0, 0.08), rng.gauss(0.06, 0.01), rng.gauss(1.0, 0.2)])
+        return data
+
+    def test_fit_converges(self):
+        data = self._make_synthetic_data(120)
+        cfg = HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30)
+        hmm = GaussianHMM(cfg)
+        converged = hmm.fit(data)
+        self.assertTrue(hmm.is_fitted)
+
+    def test_fit_too_few_samples(self):
+        cfg = HMMConfig(n_states=3, n_features=3, min_obs=30)
+        hmm = GaussianHMM(cfg)
+        result = hmm.fit([[0.0, 0.0, 0.0]] * 10)
+        self.assertFalse(result)
+        self.assertFalse(hmm.is_fitted)
+
+    def test_predict_returns_states(self):
+        data = self._make_synthetic_data(120)
+        cfg = HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30)
+        hmm = GaussianHMM(cfg)
+        hmm.fit(data)
+        states = hmm.predict(data)
+        self.assertEqual(len(states), len(data))
+        self.assertTrue(all(0 <= s < 3 for s in states))
+
+    def test_predict_proba_sums_to_one(self):
+        data = self._make_synthetic_data(120)
+        cfg = HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30)
+        hmm = GaussianHMM(cfg)
+        hmm.fit(data)
+        proba = hmm.predict_proba(data)
+        self.assertEqual(len(proba), len(data))
+        for row in proba:
+            self.assertAlmostEqual(sum(row), 1.0, places=5)
+
+    def test_predict_raises_when_not_fitted(self):
+        cfg = HMMConfig(n_states=3, n_features=3)
+        hmm = GaussianHMM(cfg)
+        with self.assertRaises(RuntimeError):
+            hmm.predict([[0.0, 0.0, 0.0]])
+
+    def test_serialize_deserialize(self):
+        data = self._make_synthetic_data(120)
+        cfg = HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30)
+        hmm = GaussianHMM(cfg)
+        hmm.fit(data)
+        d = hmm.to_dict()
+        hmm2 = GaussianHMM.from_dict(d)
+        self.assertTrue(hmm2.is_fitted)
+        states1 = hmm.predict(data)
+        states2 = hmm2.predict(data)
+        self.assertEqual(states1, states2)
+
+
+class TestHMMModel(unittest.TestCase):
+    """HMMModel のラッパー機能テスト。"""
+
+    def _make_synthetic_data(self, n_samples: int = 100) -> list:
+        import random
+        rng = random.Random(42)
+        data = []
+        for i in range(n_samples):
+            if i < n_samples // 3:
+                data.append([rng.gauss(0.0, 0.01), rng.gauss(0.005, 0.002), rng.gauss(0.3, 0.05)])
+            elif i < 2 * n_samples // 3:
+                data.append([rng.gauss(0.0, 0.03), rng.gauss(0.02, 0.005), rng.gauss(0.5, 0.1)])
+            else:
+                data.append([rng.gauss(0.0, 0.08), rng.gauss(0.06, 0.01), rng.gauss(1.0, 0.2)])
+        return data
+
+    def test_unfitted_returns_none(self):
+        model = HMMModel()
+        self.assertIsNone(model.predict([[0.0, 0.0, 0.0]]))
+        self.assertIsNone(model.predict_proba([[0.0, 0.0, 0.0]]))
+        self.assertIsNone(model.predict_mode([[0.0, 0.0, 0.0]]))
+
+    def test_fitted_returns_state(self):
+        data = self._make_synthetic_data(120)
+        model = HMMModel(config=HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30))
+        model.fit(data)
+        state = model.predict(data)
+        self.assertIsNotNone(state)
+        self.assertIn(state, [0, 1, 2])
+
+    def test_predict_mode_returns_regime_string(self):
+        data = self._make_synthetic_data(120)
+        model = HMMModel(config=HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30))
+        model.fit(data)
+        mode = model.predict_mode(data)
+        self.assertIn(mode, ["NORMAL", "CAUTION", "NO_NEW_ENTRY"])
+
+    def test_save_and_load(self):
+        import tempfile
+        import os
+        data = self._make_synthetic_data(120)
+        model = HMMModel(config=HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30))
+        model.fit(data)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "test_hmm.json")
+            model.save(path)
+            loaded = HMMModel.load(path)
+            self.assertIsNotNone(loaded)
+            self.assertTrue(loaded.is_fitted)
+            self.assertEqual(model.predict(data), loaded.predict(data))
+
+    def test_load_nonexistent_returns_none(self):
+        result = HMMModel.load("/nonexistent/path/model.json")
+        self.assertIsNone(result)
+
+
+class TestHMMFallbackInController(unittest.TestCase):
+    """Phase 2: HMM が未学習の場合、Phase 1 にフォールバックすること。"""
+
+    def test_no_hmm_fallback(self):
+        rc = RegimeController()
+        decision = rc.evaluate(symbol="TEST", current_time_ms=1624277100000)
+        self.assertEqual(decision.mode, RegimeMode.NORMAL)
+        self.assertNotIn("HMM_OVERRIDE_NORMAL", decision.reason_codes)
+
+    def test_unfitted_hmm_fallback(self):
+        hmm = HMMModel()
+        rc = RegimeController(hmm_model=hmm)
+        decision = rc.evaluate(symbol="TEST", current_time_ms=1624277100000)
+        self.assertEqual(decision.mode, RegimeMode.NORMAL)
+        self.assertNotIn("HMM_OVERRIDE_NORMAL", decision.reason_codes)
+
+    def test_hmm_does_not_override_hard_block(self):
+        """hard block (FORCE_EXIT) は HMM が上書きしない。"""
+        import random
+        rng = random.Random(42)
+        data = []
+        for i in range(120):
+            data.append([rng.gauss(0.0, 0.01), rng.gauss(0.005, 0.002), rng.gauss(0.3, 0.05)])
+        hmm = HMMModel(config=HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30))
+        hmm.fit(data)
+
+        rc = RegimeController(hmm_model=hmm)
+        decision = rc.evaluate(
+            symbol="TEST",
+            account_state={"margin_level": 150.0},
+            current_time_ms=1624277100000,
+        )
+        self.assertEqual(decision.mode, RegimeMode.FORCE_EXIT)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 3: Execution Quality Model Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestExecutionQualityModel(unittest.TestCase):
+    """ExecutionQualityModel の単体テスト。"""
+
+    def test_no_history_returns_default(self):
+        eq = ExecutionQualityModel()
+        score, details = eq.score("UNKNOWN_BROKER")
+        self.assertEqual(score, 80.0)
+        self.assertEqual(details, {})
+
+    def test_none_broker_returns_default(self):
+        eq = ExecutionQualityModel()
+        score, details = eq.score(None)
+        self.assertEqual(score, 80.0)
+
+    def test_insufficient_records_returns_default(self):
+        eq = ExecutionQualityModel(config=ExecutionQualityConfig(min_records=10))
+        for _ in range(5):
+            eq.record(broker_id="XM", slippage=0.1)
+        score, details = eq.score("XM")
+        self.assertEqual(score, 80.0)
+
+    def test_good_broker_scores_high(self):
+        eq = ExecutionQualityModel(config=ExecutionQualityConfig(min_records=5))
+        for _ in range(10):
+            eq.record(broker_id="XM", slippage=0.1, rejected=False, filled=True)
+        score, details = eq.score("XM")
+        self.assertGreaterEqual(score, 90.0)
+        self.assertIn("slippage_avg", details)
+
+    def test_bad_broker_scores_low(self):
+        eq = ExecutionQualityModel(config=ExecutionQualityConfig(min_records=5))
+        for _ in range(10):
+            eq.record(broker_id="BAD", slippage=1.5, rejected=True, filled=False)
+        score, details = eq.score("BAD")
+        self.assertLessEqual(score, 30.0)
+
+    def test_multiple_brokers_independent(self):
+        eq = ExecutionQualityModel(config=ExecutionQualityConfig(min_records=5))
+        for _ in range(10):
+            eq.record(broker_id="GOOD", slippage=0.1, rejected=False, filled=True)
+            eq.record(broker_id="BAD", slippage=1.5, rejected=True, filled=False)
+        score_good, _ = eq.score("GOOD")
+        score_bad, _ = eq.score("BAD")
+        self.assertGreater(score_good, score_bad)
+
+    def test_history_count(self):
+        eq = ExecutionQualityModel()
+        for _ in range(5):
+            eq.record(broker_id="XM", slippage=0.1)
+        self.assertEqual(eq.get_history_count("XM"), 5)
+        self.assertEqual(eq.get_history_count("UNKNOWN"), 0)
+
+    def test_list_brokers(self):
+        eq = ExecutionQualityModel()
+        eq.record(broker_id="XM", slippage=0.1)
+        eq.record(broker_id="Titan", slippage=0.2)
+        brokers = eq.list_brokers()
+        self.assertIn("XM", brokers)
+        self.assertIn("Titan", brokers)
+
+    def test_clear(self):
+        eq = ExecutionQualityModel()
+        eq.record(broker_id="XM", slippage=0.1)
+        eq.record(broker_id="Titan", slippage=0.2)
+        eq.clear("XM")
+        self.assertEqual(eq.get_history_count("XM"), 0)
+        self.assertEqual(eq.get_history_count("Titan"), 1)
+        eq.clear()
+        self.assertEqual(len(eq.list_brokers()), 0)
+
+    def test_max_history_cap(self):
+        eq = ExecutionQualityModel(config=ExecutionQualityConfig(max_history=10))
+        for i in range(20):
+            eq.record(broker_id="XM", slippage=0.1 * i)
+        self.assertEqual(eq.get_history_count("XM"), 10)
+
+
+class TestExecutionQualityInController(unittest.TestCase):
+    """Phase 3: ExecutionQualityModel が RegimeController に統合されること。"""
+
+    def test_broker_score_overrides_execution_score(self):
+        eq = ExecutionQualityModel(config=ExecutionQualityConfig(min_records=5))
+        for _ in range(10):
+            eq.record(broker_id="BAD", slippage=1.5, rejected=True, filled=False)
+        rc = RegimeController(execution_quality_model=eq)
+        decision = rc.evaluate(
+            symbol="TEST",
+            broker_id="BAD",
+            current_time_ms=1624277100000,
+        )
+        self.assertIn("EXECUTION_SCORE_FROM_BROKER_MODEL", decision.reason_codes)
+
+    def test_no_broker_id_no_override(self):
+        eq = ExecutionQualityModel(config=ExecutionQualityConfig(min_records=5))
+        for _ in range(10):
+            eq.record(broker_id="XM", slippage=0.1)
+        rc = RegimeController(execution_quality_model=eq)
+        decision = rc.evaluate(
+            symbol="TEST",
+            current_time_ms=1624277100000,
+        )
+        self.assertNotIn("EXECUTION_SCORE_FROM_BROKER_MODEL", decision.reason_codes)
+
+    def test_no_eq_model_no_override(self):
+        rc = RegimeController()
+        decision = rc.evaluate(
+            symbol="TEST",
+            broker_id="XM",
+            current_time_ms=1624277100000,
+        )
+        self.assertNotIn("EXECUTION_SCORE_FROM_BROKER_MODEL", decision.reason_codes)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 2/3: Feature Collector Extensions
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestFeatureCollectorPhase2(unittest.TestCase):
+    """Phase 2: 時系列特徴量の収集。"""
+
+    def test_time_series_from_bars(self):
+        collector = FeatureCollector()
+        bars = []
+        base = 100.0
+        for i in range(30):
+            bars.append({
+                "open": base, "high": base + 0.5, "low": base - 0.5,
+                "close": base + 0.1 * (i % 3 - 1), "spread_avg": 0.2 + 0.01 * i,
+            })
+            base += 0.1
+        f = collector.collect(symbol="TEST", bars=bars, current_time_ms=1624277100000)
+        self.assertIsNotNone(f.returns_series)
+        self.assertEqual(len(f.returns_series), 29)
+        self.assertIsNotNone(f.volatility_series)
+        self.assertGreater(len(f.volatility_series), 0)
+        self.assertIsNotNone(f.spread_series)
+        self.assertEqual(len(f.spread_series), 30)
+
+    def test_insufficient_bars_no_time_series(self):
+        collector = FeatureCollector()
+        f = collector.collect(symbol="TEST", bars=[], current_time_ms=1624277100000)
+        self.assertIsNone(f.returns_series)
+        self.assertIn("time_series_insufficient_bars", f.missing_fields)
+
+
+class TestFeatureCollectorPhase3(unittest.TestCase):
+    """Phase 3: ブローカー/口座識別子の収集。"""
+
+    def test_broker_info_collected(self):
+        collector = FeatureCollector()
+        f = collector.collect(
+            symbol="TEST",
+            broker_id="XM",
+            account_id="12345",
+            server_name="XMTrading-MT5",
+            current_time_ms=1624277100000,
+        )
+        self.assertEqual(f.broker_id, "XM")
+        self.assertEqual(f.account_id, "12345")
+        self.assertEqual(f.server_name, "XMTrading-MT5")
+        self.assertNotIn("broker_id_not_provided", f.missing_fields)
+
+    def test_no_broker_info_marks_missing(self):
+        collector = FeatureCollector()
+        f = collector.collect(symbol="TEST", current_time_ms=1624277100000)
+        self.assertIsNone(f.broker_id)
+        self.assertIn("broker_id_not_provided", f.missing_fields)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 2/3: RegimeFeatures extensions
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestRegimeFeaturesPhase2Fields(unittest.TestCase):
+    """Phase 2/3 の新しいフィールドが RegimeFeatures に存在すること。"""
+
+    def test_phase2_fields_exist(self):
+        f = RegimeFeatures(symbol="TEST", timestamp="2026-06-21T12:00:00")
+        self.assertIsNone(f.returns_series)
+        self.assertIsNone(f.volatility_series)
+        self.assertIsNone(f.spread_series)
+        self.assertIsNone(f.volume_series)
+        self.assertIsNone(f.hmm_state)
+        self.assertIsNone(f.hmm_state_proba)
+
+    def test_phase3_fields_exist(self):
+        f = RegimeFeatures(symbol="TEST", timestamp="2026-06-21T12:00:00")
+        self.assertIsNone(f.broker_id)
+        self.assertIsNone(f.account_id)
+        self.assertIsNone(f.server_name)
+        self.assertIsNone(f.broker_slippage_avg)
+        self.assertIsNone(f.broker_reject_rate)
+        self.assertIsNone(f.broker_fill_rate)
+        self.assertIsNone(f.broker_execution_score)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Public API import test
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestPublicAPIImports(unittest.TestCase):
+    """__init__.py から新しいクラスがインポート可能なこと。"""
+
+    def test_phase2_imports(self):
+        from regime import HMMModel, HMMConfig, GaussianHMM
+        self.assertIsNotNone(HMMModel)
+        self.assertIsNotNone(HMMConfig)
+        self.assertIsNotNone(GaussianHMM)
+
+    def test_phase3_imports(self):
+        from regime import ExecutionQualityModel, ExecutionQualityConfig, ExecutionRecord
+        self.assertIsNotNone(ExecutionQualityModel)
+        self.assertIsNotNone(ExecutionQualityConfig)
+        self.assertIsNotNone(ExecutionRecord)
 
 
 if __name__ == "__main__":
