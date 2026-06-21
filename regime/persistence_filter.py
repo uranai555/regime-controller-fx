@@ -7,9 +7,12 @@
 - raw_mode が変わったらカウンターリセット
 """
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from regime.types import RegimeMode, _RISK_ORDER
 
@@ -54,6 +57,10 @@ class PersistenceFilter:
 
         if raw_level > current_level:
             # ── 危険方向: 即時反映 ──
+            logger.info(
+                "Immediate escalation: %s → %s",
+                self._state.current_mode.value, raw_mode.value,
+            )
             self._state.current_mode = raw_mode
             self._state.pending_mode = None
             self._state.pending_count = 0
@@ -73,6 +80,12 @@ class PersistenceFilter:
             self._state.pending_count = 1
 
         if self._state.pending_count >= self.confirm_bars:
+            logger.info(
+                "Safe transition confirmed (%d bars): %s → %s",
+                self.confirm_bars,
+                self._state.current_mode.value,
+                raw_mode.value,
+            )
             self._state.current_mode = raw_mode
             self._state.pending_mode = None
             self._state.pending_count = 0

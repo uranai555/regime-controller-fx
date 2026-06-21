@@ -5,10 +5,13 @@ CSV 出力は後続 Phase で追加可能。
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from regime.types import RegimeDecision
 
@@ -77,8 +80,7 @@ class RegimeVaultLogger:
 
             return True
         except (OSError, IOError) as e:
-            # ログ書き込み失敗で処理を止めない
-            print(f"[RegimeVaultLogger] write error: {e}")
+            logger.warning("Vault write failed: %s", e)
             return False
 
     def flush(self) -> None:

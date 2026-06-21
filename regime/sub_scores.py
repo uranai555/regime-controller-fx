@@ -153,12 +153,13 @@ class SubScoreCalculator:
         """重み付き平均で cb_run_score を計算する。"""
         if weights is None:
             weights = {
-                "volatility_score": 0.20,
-                "trend_safety_score": 0.20,
-                "spread_score": 0.20,
-                "event_safety_score": 0.15,
-                "inventory_score": 0.15,
+                "volatility_score": 0.18,
+                "trend_safety_score": 0.18,
+                "spread_score": 0.18,
+                "event_safety_score": 0.13,
+                "inventory_score": 0.13,
                 "execution_score": 0.10,
+                "cb_efficiency_score": 0.10,
             }
 
         score = 0.0
@@ -189,9 +190,12 @@ class SubScoreCalculator:
         if p < self.cfg.atr_pct_very_low:
             codes.append(RC_VOL_TOO_LOW)
             return 60.0, codes
-        if self.cfg.atr_pct_normal_low <= p <= self.cfg.atr_pct_normal_high:
+        if p < self.cfg.atr_pct_normal_low:
+            # very_low〜normal_low: 低ボラだが極端ではない
+            return 80.0, codes
+        if p <= self.cfg.atr_pct_normal_high:
             return 100.0, codes  # 理想
-        if self.cfg.atr_pct_normal_high < p <= self.cfg.atr_pct_high:
+        if p <= self.cfg.atr_pct_high:
             return 75.0, codes
         if self.cfg.atr_pct_high < p <= self.cfg.atr_pct_extreme:
             codes.append(RC_VOL_HIGH)

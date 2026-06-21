@@ -8,9 +8,12 @@ missing_fields に記録する。sub_scores.py 側で安全寄りのデフォル
 フォールバックする。
 """
 
+import logging
 import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from regime.types import RegimeFeatures
 
@@ -46,6 +49,7 @@ class FeatureCollector:
         account_state: Optional[Dict[str, Any]] = None,
         cb_config: Optional[Dict[str, Any]] = None,
         current_time_ms: Optional[int] = None,
+        minutes_to_high_impact_event: Optional[int] = None,
     ) -> RegimeFeatures:
         """dict ベースの入力から RegimeFeatures を組み立てる。
 
@@ -73,10 +77,13 @@ class FeatureCollector:
         self._collect_spread(bars, features, missing)
 
         # ── Time / Event ──
-        self._collect_time(features, missing, current_time_ms)
+        self._collect_time(features, missing, current_time_ms, minutes_to_high_impact_event)
 
         # ── Position / Inventory ──
         self._collect_inventory(positions, features, missing)
+
+        # ── Account State (margin) ──
+        self._collect_account(account_state, features, missing)
 
         # ── Execution Quality ──
         self._collect_execution(execution_stats, features, missing)
@@ -175,18 +182,24 @@ class FeatureCollector:
         features: RegimeFeatures,
         missing: List[str],
         current_time_ms: Optional[int],
+        minutes_to_high_impact_event: Optional[int] = None,
     ) -> None:
-        try:
-            dt = datetime.fromtimestamp(
-                (current_time_ms or 0) / 1000.0, tz=timezone.utc
-            )
-            features.hour = dt.hour
-            features.weekday = dt.weekday()
-        except (ValueError, OSError, OverflowError):
-            missing.append("timestamp_parse_failed")
+        if current_time_ms is not None:
+            try:
+                dt = datetime.fromtimestamp(
+                    current_time_ms / 1000.0, tz=timezone.utc
+                )
+                features.hour = dt.hour
+                features.weekday = dt.weekday()
+            except (ValueError, OSError, OverflowError):
+                missing.append("timestamp_parse_failed")
+        else:
+            missing.append("timestamp_not_provided")
 
-        # イベントカレンダー未接続 → None のまま
-        missing.append("event_calendar_not_connected")
+        if minutes_to_high_impact_event is not None:
+            features.minutes_to_high_impact_event = minutes_to_high_impact_event
+        else:
+            missing.append("event_calendar_not_connected")
 
     def _collect_inventory(
         self,
@@ -207,6 +220,11 @@ class FeatureCollector:
         open_positions = [p for p in positions if p.get("is_open", True)]
 
         features.open_position_count = len(open_positions)
+
+        volume_defaulted = any("volume" not in p for p in open_positions)
+        if volume_defaulted:
+            missing.append("position_volume_defaulted_to_1.0")
+            logger.warning("Some positions missing 'volume' key — defaulting to 1.0 lot")
 
         long_lots = sum(p.get("volume", 1.0) for p in open_positions if p.get("direction") == "BUY")
         short_lots = sum(p.get("volume", 1.0) for p in open_positions if p.get("direction") == "SELL")
@@ -229,6 +247,20 @@ class FeatureCollector:
         else:
             features.floating_pnl_velocity = 0.0
         self._prev_floating_pnl = total_pnl
+
+    def _collect_account(
+        self,
+        account_state: Optional[Dict[str, Any]],
+        features: RegimeFeatures,
+        missing: List[str],
+    ) -> None:
+        if account_state is None:
+            missing.append("account_state_not_provided")
+            return
+
+        features.margin_level = account_state.get("margin_level")
+        if features.margin_level is None:
+            missing.append("margin_level_not_available")
 
     def _collect_execution(
         self,

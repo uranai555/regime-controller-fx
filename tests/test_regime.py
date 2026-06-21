@@ -226,5 +226,197 @@ class TestFeatureCollector(unittest.TestCase):
         self.assertEqual(f.cb_edge_per_lot, 6.0)
 
 
+class TestVolatilityScoreGapFix(unittest.TestCase):
+    """Bug fix: atr_pct between very_low and normal_low was falling through to EXTREME."""
+
+    def setUp(self):
+        self.scorer = SubScoreCalculator()
+
+    def _features(self, **overrides) -> RegimeFeatures:
+        f = RegimeFeatures(symbol="TEST", timestamp="2026-06-21T12:00:00")
+        for k, v in overrides.items():
+            setattr(f, k, v)
+        return f
+
+    def test_atr_pct_between_very_low_and_normal_low(self):
+        f = self._features(atr_pct=0.0002)
+        score, codes = self.scorer._volatility_score(f)
+        self.assertEqual(score, 80.0)
+        self.assertEqual(codes, [])
+
+    def test_atr_pct_at_very_low_boundary(self):
+        f = self._features(atr_pct=0.0001)
+        score, codes = self.scorer._volatility_score(f)
+        self.assertEqual(score, 80.0)
+        self.assertEqual(codes, [])
+
+    def test_atr_pct_just_below_very_low(self):
+        f = self._features(atr_pct=0.00005)
+        score, codes = self.scorer._volatility_score(f)
+        self.assertEqual(score, 60.0)
+        self.assertIn("VOLATILITY_TOO_LOW", codes)
+
+
+class TestCbEfficiencyScoreInAggregation(unittest.TestCase):
+    """Bug fix: cb_efficiency_score was calculated but not used in cb_run_score."""
+
+    def test_cb_efficiency_included_in_default_weights(self):
+        scorer = SubScoreCalculator()
+        sub_scores = {
+            "volatility_score": 100.0,
+            "trend_safety_score": 100.0,
+            "spread_score": 100.0,
+            "event_safety_score": 100.0,
+            "inventory_score": 100.0,
+            "execution_score": 100.0,
+            "cb_efficiency_score": 0.0,
+        }
+        agg = scorer.aggregate(sub_scores)
+        self.assertLess(agg, 100.0)
+
+    def test_cb_efficiency_weight_in_controller_config(self):
+        config = RegimeControllerConfig()
+        self.assertIn("cb_efficiency_score", config.score_weights)
+
+
+class TestCollectTimeFix(unittest.TestCase):
+    """Bug fix: _collect_time None handling and event pass-through."""
+
+    def test_none_timestamp_gives_missing_field(self):
+        collector = FeatureCollector()
+        f = collector.collect(symbol="TEST", current_time_ms=None)
+        self.assertIn("timestamp_not_provided", f.missing_fields)
+        self.assertIsNone(f.hour)
+        self.assertIsNone(f.weekday)
+
+    def test_valid_timestamp_sets_hour_weekday(self):
+        collector = FeatureCollector()
+        f = collector.collect(symbol="TEST", current_time_ms=1624277100000)
+        self.assertIsNotNone(f.hour)
+        self.assertIsNotNone(f.weekday)
+        self.assertNotIn("timestamp_not_provided", f.missing_fields)
+
+    def test_minutes_to_event_passthrough(self):
+        collector = FeatureCollector()
+        f = collector.collect(
+            symbol="TEST",
+            current_time_ms=1624277100000,
+            minutes_to_high_impact_event=10,
+        )
+        self.assertEqual(f.minutes_to_high_impact_event, 10)
+        self.assertNotIn("event_calendar_not_connected", f.missing_fields)
+
+    def test_no_event_marks_missing(self):
+        collector = FeatureCollector()
+        f = collector.collect(symbol="TEST", current_time_ms=1624277100000)
+        self.assertIn("event_calendar_not_connected", f.missing_fields)
+        self.assertIsNone(f.minutes_to_high_impact_event)
+
+
+class TestEventHardBlock(unittest.TestCase):
+    """Integration: minutes_to_high_impact_event triggers NO_NEW_ENTRY via hard block."""
+
+    def test_event_near_blocks_entry(self):
+        rc = RegimeController()
+        decision = rc.evaluate(
+            symbol="TEST",
+            current_time_ms=1624277100000,
+            minutes_to_high_impact_event=5,
+        )
+        self.assertFalse(decision.allow_new_entry)
+        self.assertIn(decision.mode, (RegimeMode.NO_NEW_ENTRY, RegimeMode.REDUCE_ONLY, RegimeMode.FORCE_EXIT))
+
+
+class TestAccountStateCollector(unittest.TestCase):
+    """Bug fix: margin_level had no collection path via account_state."""
+
+    def test_margin_level_from_account_state(self):
+        collector = FeatureCollector()
+        f = collector.collect(
+            symbol="TEST",
+            account_state={"margin_level": 250.0},
+            current_time_ms=1624277100000,
+        )
+        self.assertEqual(f.margin_level, 250.0)
+
+    def test_no_account_state_marks_missing(self):
+        collector = FeatureCollector()
+        f = collector.collect(symbol="TEST", current_time_ms=1624277100000)
+        self.assertIn("account_state_not_provided", f.missing_fields)
+
+    def test_margin_level_force_exit_integration(self):
+        rc = RegimeController()
+        decision = rc.evaluate(
+            symbol="TEST",
+            account_state={"margin_level": 150.0},
+            current_time_ms=1624277100000,
+        )
+        self.assertEqual(decision.mode, RegimeMode.FORCE_EXIT)
+        self.assertTrue(decision.force_exit)
+
+
+class TestPositionVolumeDefaultWarning(unittest.TestCase):
+    """Bug fix: missing volume key silently defaulted to 1.0."""
+
+    def test_missing_volume_tracked_in_missing_fields(self):
+        collector = FeatureCollector()
+        positions = [
+            {"direction": "BUY", "is_open": True, "unrealized_pnl_pips": 0.0},
+        ]
+        f = collector.collect(symbol="TEST", positions=positions, current_time_ms=1624277100000)
+        self.assertIn("position_volume_defaulted_to_1.0", f.missing_fields)
+        self.assertEqual(f.long_lots, 1.0)
+
+    def test_with_volume_no_warning(self):
+        collector = FeatureCollector()
+        positions = [
+            {"direction": "BUY", "volume": 0.5, "is_open": True, "unrealized_pnl_pips": 0.0},
+        ]
+        f = collector.collect(symbol="TEST", positions=positions, current_time_ms=1624277100000)
+        self.assertNotIn("position_volume_defaulted_to_1.0", f.missing_fields)
+        self.assertEqual(f.long_lots, 0.5)
+
+
+class TestDebugSummary(unittest.TestCase):
+    """RegimeDecision.debug_summary() provides human-readable output."""
+
+    def test_debug_summary_format(self):
+        rc = RegimeController()
+        decision = rc.evaluate(
+            symbol="XAUUSD",
+            current_time_ms=1624277100000,
+        )
+        summary = decision.debug_summary()
+        self.assertIn("XAUUSD", summary)
+        self.assertIn("mode=", summary)
+        self.assertIn("score=", summary)
+        self.assertIn("entry=", summary)
+
+
+class TestFeaturesToDictIntrospection(unittest.TestCase):
+    """_features_to_dict uses dataclass fields instead of hardcoded list."""
+
+    def test_all_non_none_fields_included(self):
+        rc = RegimeController()
+        bars = []
+        base = 100.0
+        for i in range(21):
+            bars.append({
+                "open": base, "high": base + 0.5, "low": base - 0.5,
+                "close": base + 0.1, "spread_avg": 0.2,
+            })
+            base += 0.1
+        decision = rc.evaluate(
+            symbol="TEST",
+            bars=bars,
+            current_time_ms=1624277100000,
+        )
+        self.assertIn("atr", decision.features)
+        self.assertIn("spread_ratio", decision.features)
+        self.assertNotIn("symbol", decision.features)
+        self.assertNotIn("timestamp", decision.features)
+        self.assertNotIn("missing_fields", decision.features)
+
+
 if __name__ == "__main__":
     unittest.main()
