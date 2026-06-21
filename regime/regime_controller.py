@@ -389,6 +389,69 @@ class RegimeController:
             symbol=features.symbol,
         )
 
+    def train_hmm(
+        self,
+        bars: List[Dict[str, Any]],
+        config: Optional[HMMConfig] = None,
+    ) -> bool:
+        """bars から HMM を学習し、self.hmm_model に設定する。
+
+        FeatureCollector._collect_time_series と同じロジックで
+        bars → returns/volatility/spread の T×3 行列を構築し、HMM を fit する。
+
+        Args:
+            bars: 学習用ヒストリカル bars (dict リスト)
+            config: HMMConfig (省略時はデフォルト)
+
+        Returns:
+            True if converged
+        """
+        import math as _math
+
+        if len(bars) < 2:
+            logger.warning("train_hmm: insufficient bars (%d)", len(bars))
+            return False
+
+        # returns
+        returns: List[float] = []
+        for i in range(1, len(bars)):
+            prev_c = bars[i - 1].get("close", 1.0)
+            curr_c = bars[i].get("close", 1.0)
+            if prev_c > 0:
+                returns.append(_math.log(curr_c / prev_c))
+
+        # rolling volatility (5-bar)
+        vol_series: List[float] = []
+        if len(returns) >= 5:
+            for i in range(4, len(returns)):
+                window = returns[i - 4 : i + 1]
+                mean_r = sum(window) / len(window)
+                var = sum((r - mean_r) ** 2 for r in window) / len(window)
+                vol_series.append(_math.sqrt(var))
+
+        # spread
+        spread_vals = [
+            b.get("spread_avg", 0.0) for b in bars
+            if b.get("spread_avg") is not None
+        ]
+
+        # align
+        n = min(len(returns), len(vol_series), len(spread_vals))
+        if n < 5:
+            logger.warning("train_hmm: aligned series too short (%d)", n)
+            return False
+
+        obs = [
+            [returns[-n + i], vol_series[-n + i], spread_vals[-n + i]]
+            for i in range(n)
+        ]
+
+        cfg = config or HMMConfig()
+        self.hmm_model = HMMModel(config=cfg)
+        result = self.hmm_model.fit(obs)
+        logger.info("train_hmm: fitted=%s, n_obs=%d", self.hmm_model.is_fitted, n)
+        return result
+
     def reset(self) -> None:
         """内部状態をリセット（新規バックテスト開始時など）。"""
         self.persistence_filter.reset(RegimeMode.NORMAL)
@@ -416,13 +479,34 @@ class RegimeController:
 
     @staticmethod
     def _features_to_dict(features: RegimeFeatures) -> Dict[str, Any]:
-        """RegimeFeatures を flat dict に変換する。ログ用。"""
+        """RegimeFeatures を flat dict に変換する（ログ用）。
+
+        時系列リスト (returns_series 等) はログ肥大化を防ぐため
+        長さとサマリ統計 (mean, std, last) に圧縮する。
+        """
         _SKIP = {"symbol", "timestamp", "missing_fields"}
-        d = {}
+        _SERIES_FIELDS = {
+            "returns_series", "volatility_series",
+            "spread_series", "volume_series",
+        }
+        d: Dict[str, Any] = {}
         for f in dataclasses.fields(features):
             if f.name in _SKIP:
                 continue
             val = features.__dict__.get(f.name)
-            if val is not None:
+            if val is None:
+                continue
+            if f.name in _SERIES_FIELDS and isinstance(val, list) and len(val) > 0:
+                import math as _math
+                n = len(val)
+                mean = sum(val) / n
+                var = sum((v - mean) ** 2 for v in val) / n
+                d[f.name] = {
+                    "len": n,
+                    "mean": round(mean, 6),
+                    "std": round(_math.sqrt(var), 6),
+                    "last": round(val[-1], 6),
+                }
+            else:
                 d[f.name] = val
         return d

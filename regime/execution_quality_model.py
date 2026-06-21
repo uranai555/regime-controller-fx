@@ -12,9 +12,11 @@ RegimeController が既存の execution_score をブローカー品質で
   - 履歴が min_records 未満 → デフォルト 80 点を返す
 """
 
+import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -159,3 +161,45 @@ class ExecutionQualityModel:
             self._history.clear()
         elif broker_id in self._history:
             del self._history[broker_id]
+
+    def save(self, path: str) -> None:
+        """ブローカー別履歴を JSON ファイルに保存する。"""
+        data: Dict[str, List[Dict]] = {}
+        for broker_id, records in self._history.items():
+            data[broker_id] = [
+                {
+                    "slippage": r.slippage,
+                    "rejected": r.rejected,
+                    "filled": r.filled,
+                    "timestamp_ms": r.timestamp_ms,
+                }
+                for r in records
+            ]
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, indent=2))
+        logger.info("ExecutionQualityModel saved to %s (%d brokers)", path, len(data))
+
+    @classmethod
+    def load(cls, path: str, config: Optional["ExecutionQualityConfig"] = None) -> Optional["ExecutionQualityModel"]:
+        """JSON ファイルからモデルをロードする。ファイルがなければ None。"""
+        p = Path(path)
+        if not p.exists():
+            logger.info("ExecutionQualityModel file not found: %s", path)
+            return None
+        try:
+            data = json.loads(p.read_text())
+            model = cls(config=config)
+            for broker_id, records in data.items():
+                for rec in records:
+                    model.record(
+                        broker_id=broker_id,
+                        slippage=rec.get("slippage", 0.0),
+                        rejected=rec.get("rejected", False),
+                        filled=rec.get("filled", True),
+                        timestamp_ms=rec.get("timestamp_ms", 0),
+                    )
+            return model
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error("Failed to load ExecutionQualityModel from %s: %s", path, e)
+            return None

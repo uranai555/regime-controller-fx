@@ -1,6 +1,7 @@
 import math
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from regime.types import RegimeMode, RegimeFeatures, RegimeDecision
 from regime.sub_scores import SubScoreCalculator, ScoreConfig, RC_SPREAD_WIDENING, RC_SPREAD_TOO_WIDE, RC_EXECUTION_DEFAULTED, RC_VOL_HIGH
@@ -810,6 +811,189 @@ class TestPublicAPIImports(unittest.TestCase):
         self.assertIsNotNone(ExecutionQualityModel)
         self.assertIsNotNone(ExecutionQualityConfig)
         self.assertIsNotNone(ExecutionRecord)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Improvements: auto-sort, save/load, train_hmm, features_to_dict
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestHMMAutoSortStates(unittest.TestCase):
+    """fit() 後に状態がボラティリティ順にソートされること。"""
+
+    def test_states_sorted_by_volatility(self):
+        import random
+        rng = random.Random(42)
+        data = []
+        for i in range(120):
+            if i < 40:
+                data.append([rng.gauss(0.0, 0.01), rng.gauss(0.005, 0.002), rng.gauss(0.3, 0.05)])
+            elif i < 80:
+                data.append([rng.gauss(0.0, 0.03), rng.gauss(0.02, 0.005), rng.gauss(0.5, 0.1)])
+            else:
+                data.append([rng.gauss(0.0, 0.08), rng.gauss(0.06, 0.01), rng.gauss(1.0, 0.2)])
+
+        model = HMMModel(config=HMMConfig(n_states=3, n_features=3, max_iter=50, min_obs=30))
+        model.fit(data)
+        # After sort: state 0 should have lowest total variance
+        variances = model._hmm.variances
+        total_var = [sum(v) for v in variances]
+        self.assertLessEqual(total_var[0], total_var[1])
+        self.assertLessEqual(total_var[1], total_var[2])
+
+
+class TestExecutionQualitySaveLoad(unittest.TestCase):
+    """ExecutionQualityModel の save/load 永続化。"""
+
+    def test_save_and_load(self):
+        import tempfile
+        import os
+        eq = ExecutionQualityModel(config=ExecutionQualityConfig(min_records=5))
+        for i in range(10):
+            eq.record(broker_id="XM", slippage=0.1 * i, rejected=(i % 5 == 0), filled=True, timestamp_ms=i * 1000)
+        eq.record(broker_id="Titan", slippage=0.3, rejected=False, filled=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "eq_history.json")
+            eq.save(path)
+
+            loaded = ExecutionQualityModel.load(path, config=ExecutionQualityConfig(min_records=5))
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.get_history_count("XM"), 10)
+            self.assertEqual(loaded.get_history_count("Titan"), 1)
+
+            score_orig, _ = eq.score("XM")
+            score_loaded, _ = loaded.score("XM")
+            self.assertAlmostEqual(score_orig, score_loaded, places=2)
+
+    def test_load_nonexistent_returns_none(self):
+        result = ExecutionQualityModel.load("/nonexistent/path.json")
+        self.assertIsNone(result)
+
+
+class TestTrainHMM(unittest.TestCase):
+    """RegimeController.train_hmm() ヘルパー。"""
+
+    def _make_bars(self, n: int = 100) -> list:
+        import random
+        rng = random.Random(42)
+        bars = []
+        price = 100.0
+        for i in range(n):
+            change = rng.gauss(0, 0.5)
+            close = price + change
+            bars.append({
+                "open": price,
+                "high": max(price, close) + abs(rng.gauss(0, 0.2)),
+                "low": min(price, close) - abs(rng.gauss(0, 0.2)),
+                "close": close,
+                "spread_avg": 0.2 + rng.random() * 0.3,
+            })
+            price = close
+        return bars
+
+    def test_train_creates_fitted_model(self):
+        rc = RegimeController()
+        self.assertIsNone(rc.hmm_model)
+        bars = self._make_bars(100)
+        result = rc.train_hmm(bars)
+        self.assertIsNotNone(rc.hmm_model)
+        self.assertTrue(rc.hmm_model.is_fitted)
+
+    def test_train_insufficient_bars(self):
+        rc = RegimeController()
+        result = rc.train_hmm([{"close": 100, "spread_avg": 0.2}])
+        self.assertFalse(result)
+
+    def test_trained_hmm_used_in_evaluate(self):
+        rc = RegimeController()
+        bars = self._make_bars(100)
+        rc.train_hmm(bars, config=HMMConfig(n_states=3, n_features=3, min_obs=10))
+
+        decision = rc.evaluate(
+            symbol="TEST",
+            bars=bars[-30:],
+            current_time_ms=1624277100000,
+        )
+        hmm_codes = [c for c in decision.reason_codes if c.startswith("HMM_")]
+        self.assertTrue(len(hmm_codes) > 0)
+
+
+class TestFeaturesToDictSeries(unittest.TestCase):
+    """_features_to_dict が時系列をサマリ化すること。"""
+
+    def test_series_summarized(self):
+        f = RegimeFeatures(symbol="TEST", timestamp="2026-06-21T12:00:00")
+        f.returns_series = [0.01, -0.02, 0.03, -0.01, 0.005]
+        f.spread_series = [0.3, 0.4, 0.5]
+
+        d = RegimeController._features_to_dict(f)
+        self.assertIn("returns_series", d)
+        self.assertIsInstance(d["returns_series"], dict)
+        self.assertEqual(d["returns_series"]["len"], 5)
+        self.assertIn("mean", d["returns_series"])
+        self.assertIn("std", d["returns_series"])
+        self.assertIn("last", d["returns_series"])
+
+    def test_scalar_fields_unchanged(self):
+        f = RegimeFeatures(symbol="TEST", timestamp="2026-06-21T12:00:00")
+        f.atr = 1.5
+        f.broker_id = "XM"
+        f.hmm_state = 1
+        f.hmm_state_proba = [0.2, 0.5, 0.3]
+
+        d = RegimeController._features_to_dict(f)
+        self.assertEqual(d["atr"], 1.5)
+        self.assertEqual(d["broker_id"], "XM")
+        self.assertEqual(d["hmm_state"], 1)
+        self.assertEqual(d["hmm_state_proba"], [0.2, 0.5, 0.3])
+
+
+class TestVaultLoggerPhase23(unittest.TestCase):
+    """VaultLogger が Phase 2/3 フィールドを含む decision を書けること。"""
+
+    def test_write_with_phase23_features(self):
+        import tempfile
+        import os
+        from regime.vault_logger import RegimeVaultLogger
+
+        decision = RegimeDecision(
+            mode=RegimeMode.CAUTION,
+            raw_mode=RegimeMode.NORMAL,
+            allow_new_entry=True,
+            allow_add_position=True,
+            reduce_only=False,
+            force_exit=False,
+            risk_multiplier=0.5,
+            cb_run_score=72.0,
+            sub_scores={"execution_score": 85.0},
+            reason_codes=["HMM_OVERRIDE_CAUTION", "EXECUTION_SCORE_FROM_BROKER_MODEL"],
+            features={
+                "hmm_state": 1,
+                "hmm_state_proba": [0.2, 0.5, 0.3],
+                "broker_id": "XM",
+                "broker_execution_score": 85.0,
+                "returns_series": {"len": 29, "mean": 0.001, "std": 0.02, "last": -0.003},
+            },
+            missing_fields=[],
+            timestamp="2026-06-21T12:00:00",
+            symbol="XAUUSD",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = RegimeVaultLogger(vault_root=tmpdir)
+            result = logger.write(decision)
+            self.assertTrue(result)
+
+            import json
+            files = list((Path(tmpdir) / "regime").glob("*.jsonl"))
+            self.assertEqual(len(files), 1)
+            with files[0].open() as fh:
+                record = json.loads(fh.readline())
+            self.assertEqual(record["mode"], "CAUTION")
+            self.assertIn("HMM_OVERRIDE_CAUTION", record["reason_codes"])
+            self.assertEqual(record["features"]["hmm_state"], 1)
+            self.assertEqual(record["features"]["broker_id"], "XM")
 
 
 if __name__ == "__main__":

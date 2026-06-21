@@ -1,7 +1,10 @@
 """vault_logger.py — RegimeDecision を Vault に JSONL 保存する
 
-Phase 1 では vault/regime/ 以下に datetime 別の JSONL ファイルを出力する。
-CSV 出力は後続 Phase で追加可能。
+Phase 1/2/3 で vault/regime/ 以下に datetime 別の JSONL ファイルを出力する。
+Phase 2/3 フィールド (hmm_state, broker_execution_score 等) が
+features に含まれる場合はそのまま記録される。
+時系列リスト (returns_series 等) は RegimeController._features_to_dict で
+サマリ化済みのため、JSONL の肥大化は起きない。
 """
 
 import json
