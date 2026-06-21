@@ -1,11 +1,10 @@
 """regime_controller.py — RegimeController オーケストレーター
 
-FeatureCollector → [HMM + BrokerModel] → SubScoreCalculator → raw_mode → PersistenceFilter
-のパイプラインを統括する。出力は BUY/SELL ではなく戦略許可/禁止。
+Phase 1: FeatureCollector → SubScoreCalculator → raw_mode → PersistenceFilter
+Phase 2: HMMModel による隠れ状態推定 + HMMRegimeClassifier でサブスコア化
+Phase 3: ExecutionQualityModel + BrokerQualityModel によるブローカー別品質評価
 
-Phase 1: ルールベース cb_run_score
-Phase 2: HMM レジーム分類統合
-Phase 3: ブローカー別 Execution Quality Model 統合
+出力は BUY/SELL ではなく戦略許可/禁止。
 """
 
 import dataclasses
@@ -19,7 +18,9 @@ from regime.feature_collector import FeatureCollector
 from regime.persistence_filter import PersistenceFilter
 from regime.sub_scores import ScoreConfig, SubScoreCalculator
 from regime.types import RegimeDecision, RegimeFeatures, RegimeMode
-from regime.hmm_regime import HMMRegimeClassifier, HMMConfig, HMMResult
+from regime.hmm_model import HMMConfig, HMMModel
+from regime.execution_quality_model import ExecutionQualityConfig, ExecutionQualityModel
+from regime.hmm_regime import HMMRegimeClassifier, HMMConfig as HMMRegimeConfig, HMMResult
 from regime.broker_model import BrokerQualityModel, BrokerModelConfig, ExecutionEvent
 
 from regime.sub_scores import (
@@ -74,25 +75,29 @@ class RegimeControllerConfig:
         RegimeMode.FORCE_EXIT.value: 0.0,
     })
 
-    # Phase 2: HMM
-    hmm_config: HMMConfig = field(default_factory=HMMConfig)
+    # Phase 2: HMMRegimeClassifier config
+    hmm_regime_config: HMMRegimeConfig = field(default_factory=HMMRegimeConfig)
 
-    # Phase 3: Broker Quality Model
+    # Phase 3: BrokerQualityModel config
     broker_model_config: BrokerModelConfig = field(default_factory=BrokerModelConfig)
 
 
 class RegimeController:
     """レジーム判定 → 戦略許可/禁止の上位フィルター。
 
-    Phase 1: ルールベース cb_run_score
-    Phase 2: HMM レジーム分類
-    Phase 3: ブローカー別 Execution Quality Model
+    Phase 1: ルールベース cb_run_score + PersistenceFilter
+    Phase 2: HMMModel が学習済みなら raw_mode を上書き +
+             HMMRegimeClassifier でサブスコア化
+    Phase 3: ExecutionQualityModel でブローカー品質を execution_score に反映 +
+             BrokerQualityModel で broker_quality_score サブスコア
     """
 
     def __init__(
         self,
         config: Optional[RegimeControllerConfig] = None,
         score_config: Optional[ScoreConfig] = None,
+        hmm_model: Optional[HMMModel] = None,
+        execution_quality_model: Optional[ExecutionQualityModel] = None,
     ):
         self.config = config or RegimeControllerConfig()
         self.feature_collector = FeatureCollector()
@@ -100,9 +105,13 @@ class RegimeController:
         self.persistence_filter = PersistenceFilter(
             confirm_bars=self.config.confirm_bars
         )
-        # Phase 2: HMM
-        self.hmm_classifier = HMMRegimeClassifier(self.config.hmm_config)
-        # Phase 3: Broker Quality Model
+        # Phase 2: PR#2 HMMModel (injection-based)
+        self.hmm_model = hmm_model
+        # Phase 2: HMMRegimeClassifier (config-based)
+        self.hmm_classifier = HMMRegimeClassifier(self.config.hmm_regime_config)
+        # Phase 3: PR#2 ExecutionQualityModel (injection-based)
+        self.execution_quality_model = execution_quality_model
+        # Phase 3: BrokerQualityModel (config-based)
         self.broker_model = BrokerQualityModel(self.config.broker_model_config)
 
     def evaluate(
@@ -118,6 +127,8 @@ class RegimeController:
         current_time_ms: Optional[int] = None,
         minutes_to_high_impact_event: Optional[int] = None,
         broker_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+        server_name: Optional[str] = None,
     ) -> RegimeDecision:
         """FeatureCollector → [HMM + BrokerModel] → SubScoreCalculator → raw_mode → PersistenceFilter
 
@@ -139,16 +150,29 @@ class RegimeController:
             cb_config=cb_config,
             current_time_ms=current_time_ms,
             minutes_to_high_impact_event=minutes_to_high_impact_event,
+            broker_id=broker_id,
+            account_id=account_id,
+            server_name=server_name,
         )
 
-        # 2. Phase 2: HMM レジーム分類
-        self._apply_hmm(features, bars)
+        # 1b. Phase 3 (PR#2): ExecutionQualityModel でブローカー品質を特徴量に反映
+        if self.execution_quality_model is not None and broker_id is not None:
+            self.execution_quality_model.enrich_features(broker_id, features)
 
-        # 3. Phase 3: ブローカー品質モデル
+        # 2. Phase 2: HMMRegimeClassifier でサブスコア用 features をセット
+        self._apply_hmm_regime(features, bars)
+
+        # 3. Phase 3: BrokerQualityModel でサブスコア用 features をセット
         self._apply_broker_model(features, broker_id)
 
         # 4. サブスコア計算
         sub_scores, reason_codes = self.scorer.calculate(features)
+
+        # 4b. Phase 3 (PR#2): broker_execution_score で execution_score を上書き
+        if features.broker_execution_score is not None:
+            sub_scores["execution_score"] = features.broker_execution_score
+            reason_codes.append("EXECUTION_SCORE_FROM_BROKER_MODEL")
+
         cb_run_score = self.scorer.aggregate(sub_scores, self.config.score_weights)
         logger.debug(
             "[%s] sub_scores=%s cb_run_score=%.2f missing=%s",
@@ -157,6 +181,9 @@ class RegimeController:
 
         # 5. raw_mode 判定
         raw_mode = self._decide_raw_mode(features, sub_scores, cb_run_score, reason_codes)
+
+        # 5b. Phase 2 (PR#2): HMMModel が学習済みなら raw_mode を上書き
+        raw_mode = self._apply_hmm_override(features, raw_mode, reason_codes)
 
         # 6. Persistence filter
         confirmed_mode = self.persistence_filter.update(raw_mode)
@@ -177,19 +204,115 @@ class RegimeController:
         )
 
     def fit_hmm(self, bars: List[Dict[str, Any]]) -> bool:
-        """HMM モデルを学習する。
-
-        充分なバーデータ（200本以上）で呼び出す。
-        バックテスト開始時や定期的な再学習に使用。
-        """
+        """HMMRegimeClassifier を学習する。"""
         return self.hmm_classifier.fit(bars)
 
     def update_broker_profile(self, event: ExecutionEvent) -> None:
-        """ブローカープロファイルを更新する。
-
-        各約定イベントごとに呼び出す。
-        """
+        """ブローカープロファイルを更新する。"""
         self.broker_model.update(event)
+
+    # ── Phase 2/3 integration ──
+
+    def _apply_hmm_regime(
+        self,
+        features: RegimeFeatures,
+        bars: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        """HMMRegimeClassifier の分類結果を features にセットする。"""
+        if not self.hmm_classifier.available or bars is None:
+            return
+
+        result = self.hmm_classifier.predict(bars)
+        if result is not None:
+            features.hmm_regime_state = result.state.value
+            features.hmm_regime_probabilities = result.probabilities
+            features.hmm_log_likelihood = result.log_likelihood
+
+    def _apply_broker_model(
+        self,
+        features: RegimeFeatures,
+        broker_id: Optional[str],
+    ) -> None:
+        """BrokerQualityModel のスコアを features にセットする。"""
+        if not self.broker_model.enabled or broker_id is None:
+            return
+
+        features.broker_id = broker_id
+        score, _reasons = self.broker_model.score(broker_id, hour=features.hour)
+        features.broker_quality_score = score
+
+        profile = self.broker_model.get_profile(broker_id)
+        if profile is not None:
+            features.broker_slippage_mean = profile.slippage_mean
+            features.broker_slippage_p95 = profile.slippage_p95
+            features.broker_latency_p95_ms = profile.latency_p95_ms
+            features.broker_requote_rate = profile.requote_rate
+            features.broker_spread_markup = profile.spread_markup
+            if features.hour is not None and features.hour in profile.hourly_quality:
+                features.broker_hourly_quality_factor = profile.hourly_quality[features.hour]
+
+    def _apply_hmm_override(
+        self,
+        features: RegimeFeatures,
+        raw_mode: RegimeMode,
+        reason_codes: List[str],
+    ) -> RegimeMode:
+        """Phase 2 (PR#2): HMMModel が学習済みなら raw_mode を上書きする。
+
+        hard block (FORCE_EXIT, REDUCE_ONLY by margin/spread) は上書きしない。
+        HMM が未学習 or 入力不足なら raw_mode をそのまま返す（Phase 1 フォールバック）。
+        """
+        if self.hmm_model is None or not self.hmm_model.is_fitted:
+            return raw_mode
+
+        if raw_mode in (RegimeMode.FORCE_EXIT, RegimeMode.REDUCE_ONLY):
+            return raw_mode
+
+        obs = self._build_hmm_observations(features)
+        if obs is None:
+            reason_codes.append("HMM_INPUT_INSUFFICIENT")
+            return raw_mode
+
+        hmm_mode_str = self.hmm_model.predict_mode(obs)
+        if hmm_mode_str is None:
+            return raw_mode
+
+        try:
+            hmm_mode = RegimeMode(hmm_mode_str)
+        except ValueError:
+            logger.warning("HMM returned unknown mode: %s", hmm_mode_str)
+            return raw_mode
+
+        state = self.hmm_model.predict(obs)
+        proba = self.hmm_model.predict_proba(obs)
+        features.hmm_state = state
+        features.hmm_state_proba = proba
+
+        reason_codes.append(f"HMM_OVERRIDE_{hmm_mode.value}")
+        logger.info("HMM override: %s → %s", raw_mode.value, hmm_mode.value)
+        return hmm_mode
+
+    @staticmethod
+    def _build_hmm_observations(features: RegimeFeatures) -> Optional[List[List[float]]]:
+        """RegimeFeatures の時系列から HMM 入力行列を構築する。"""
+        ret = features.returns_series
+        vol = features.volatility_series
+        spr = features.spread_series
+
+        if ret is None or vol is None or spr is None:
+            return None
+
+        n = min(len(ret), len(vol), len(spr))
+        if n < 5:
+            return None
+
+        ret = ret[-n:]
+        vol = vol[-n:]
+        spr = spr[-n:]
+
+        return [[ret[i], vol[i], spr[i]] for i in range(n)]
+
+    # ── raw_mode decision ──
 
     def _decide_raw_mode(
         self,
@@ -198,41 +321,33 @@ class RegimeController:
         cb_run_score: float,
         reason_codes: List[str],
     ) -> RegimeMode:
-        """cb_run_score と hard block 条件から raw_mode を決める。
+        """cb_run_score + hard block 条件から raw_mode を決定する。"""
 
-        hard block はスコアより優先される。
-        """
+        # ── Hard blocks (スコアに関わらず強制) ──
+        if features.margin_level is not None:
+            if features.margin_level < 300:
+                reason_codes.append(RC_MARGIN_DANGER)
+                return RegimeMode.FORCE_EXIT
 
-        # ── hard block: margin ──
-        if features.margin_level is not None and features.margin_level < 300:
-            return RegimeMode.FORCE_EXIT
-
-        # ── hard block: spread ──
-        if features.spread_ratio is not None:
-            if features.spread_ratio > self.config.reduce_only_spread_ratio:
-                if RC_SPREAD_DANGER not in reason_codes:
-                    reason_codes.append(RC_SPREAD_DANGER)
-                return RegimeMode.REDUCE_ONLY
-            if features.spread_ratio > self.config.no_new_entry_spread_ratio:
-                if RC_SPREAD_TOO_WIDE not in reason_codes:
-                    reason_codes.append(RC_SPREAD_TOO_WIDE)
-                return RegimeMode.NO_NEW_ENTRY
-
-        # ── hard block: event ──
-        if features.minutes_to_high_impact_event is not None:
-            if 0 <= features.minutes_to_high_impact_event <= 15:
-                if RC_EVENT_NEAR not in reason_codes:
-                    reason_codes.append(RC_EVENT_NEAR)
-                return RegimeMode.NO_NEW_ENTRY
-
-        # ── hard block: floating PnL velocity ──
         if features.floating_pnl_velocity is not None:
             if features.floating_pnl_velocity < -30:
-                if RC_PNL_DETERIORATING not in reason_codes:
-                    reason_codes.append(RC_PNL_DETERIORATING)
+                reason_codes.append(RC_PNL_DETERIORATING)
                 return RegimeMode.REDUCE_ONLY
 
-        # ── score-based ──
+        if features.spread_ratio is not None:
+            if features.spread_ratio > self.config.reduce_only_spread_ratio:
+                reason_codes.append(RC_SPREAD_DANGER)
+                return RegimeMode.REDUCE_ONLY
+            if features.spread_ratio > self.config.no_new_entry_spread_ratio:
+                reason_codes.append(RC_SPREAD_TOO_WIDE)
+                return RegimeMode.NO_NEW_ENTRY
+
+        if features.minutes_to_high_impact_event is not None:
+            if features.minutes_to_high_impact_event <= 15:
+                reason_codes.append(RC_EVENT_NEAR)
+                return RegimeMode.NO_NEW_ENTRY
+
+        # ── Score-based thresholds ──
         if cb_run_score >= self.config.normal_score:
             return RegimeMode.NORMAL
         if cb_run_score >= self.config.caution_score:
@@ -241,8 +356,9 @@ class RegimeController:
             return RegimeMode.NO_NEW_ENTRY
         if cb_run_score >= self.config.reduce_only_score:
             return RegimeMode.REDUCE_ONLY
-
         return RegimeMode.FORCE_EXIT
+
+    # ── decision builder ──
 
     def _build_decision(
         self,
@@ -277,49 +393,6 @@ class RegimeController:
         """内部状態をリセット（新規バックテスト開始時など）。"""
         self.persistence_filter.reset(RegimeMode.NORMAL)
 
-    # ── Phase 2/3 integration ──
-
-    def _apply_hmm(
-        self,
-        features: RegimeFeatures,
-        bars: Optional[List[Dict[str, Any]]],
-    ) -> None:
-        """HMM 分類結果を features にセットする。"""
-        if not self.hmm_classifier.available or bars is None:
-            return
-
-        result = self.hmm_classifier.predict(bars)
-        if result is not None:
-            features.hmm_regime_state = result.state.value
-            features.hmm_regime_probabilities = result.probabilities
-            features.hmm_log_likelihood = result.log_likelihood
-
-    def _apply_broker_model(
-        self,
-        features: RegimeFeatures,
-        broker_id: Optional[str],
-    ) -> None:
-        """ブローカー品質スコアを features にセットする。"""
-        if not self.broker_model.enabled or broker_id is None:
-            return
-
-        features.broker_id = broker_id
-        score, _reasons = self.broker_model.score(broker_id, hour=features.hour)
-        features.broker_quality_score = score
-
-        # プロファイルから詳細メトリクスを転記
-        profile = self.broker_model.get_profile(broker_id)
-        if profile is not None:
-            features.broker_slippage_mean = profile.slippage_mean
-            features.broker_slippage_p95 = profile.slippage_p95
-            features.broker_latency_p95_ms = profile.latency_p95_ms
-            features.broker_reject_rate = profile.reject_rate
-            features.broker_fill_rate = profile.fill_rate
-            features.broker_requote_rate = profile.requote_rate
-            features.broker_spread_markup = profile.spread_markup
-            if features.hour is not None and features.hour in profile.hourly_quality:
-                features.broker_hourly_quality_factor = profile.hourly_quality[features.hour]
-
     def _disabled_decision(
         self, symbol: str, current_time_ms: Optional[int]
     ) -> RegimeDecision:
@@ -343,7 +416,7 @@ class RegimeController:
 
     @staticmethod
     def _features_to_dict(features: RegimeFeatures) -> Dict[str, Any]:
-        """RegimeFeatures を flat dict に変換する（ログ用）。"""
+        """RegimeFeatures を flat dict に変換する。ログ用。"""
         _SKIP = {"symbol", "timestamp", "missing_fields"}
         d = {}
         for f in dataclasses.fields(features):

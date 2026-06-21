@@ -12,9 +12,15 @@ from regime.regime_controller import RegimeController, RegimeControllerConfig
 from regime.sub_scores import ScoreConfig
 from regime.types import RegimeDecision, RegimeFeatures, RegimeMode
 from regime.persistence_filter import PersistenceFilter, PersistenceFilterState
+from regime.hmm_model import HMMModel, HMMConfig, GaussianHMM
+from regime.execution_quality_model import (
+    ExecutionQualityModel,
+    ExecutionQualityConfig,
+    ExecutionRecord,
+)
 from regime.hmm_regime import (
     HMMRegimeClassifier,
-    HMMConfig,
+    HMMConfig as HMMRegimeConfig,
     HMMRegimeState,
     HMMResult,
 )
@@ -34,12 +40,20 @@ __all__ = [
     "RegimeMode",
     "PersistenceFilter",
     "PersistenceFilterState",
-    # Phase 2
-    "HMMRegimeClassifier",
+    # Phase 2 (PR#2 modules)
+    "HMMModel",
     "HMMConfig",
+    "GaussianHMM",
+    # Phase 2 (HMMRegimeClassifier)
+    "HMMRegimeClassifier",
+    "HMMRegimeConfig",
     "HMMRegimeState",
     "HMMResult",
-    # Phase 3
+    # Phase 3 (PR#2 modules)
+    "ExecutionQualityModel",
+    "ExecutionQualityConfig",
+    "ExecutionRecord",
+    # Phase 3 (BrokerQualityModel)
     "BrokerQualityModel",
     "BrokerModelConfig",
     "BrokerProfile",

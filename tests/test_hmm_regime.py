@@ -259,7 +259,7 @@ class TestHMMIntegration(unittest.TestCase):
 
     def test_controller_config_includes_hmm(self):
         config = RegimeControllerConfig()
-        self.assertIsNotNone(config.hmm_config)
+        self.assertIsNotNone(config.hmm_regime_config)
         self.assertIn("hmm_regime_score", config.score_weights)
 
     def test_hmm_score_in_decision_sub_scores(self):
