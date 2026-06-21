@@ -121,3 +121,19 @@ class RegimeDecision:
 
     timestamp: str = ""
     symbol: str = ""
+
+    def debug_summary(self) -> str:
+        """人間が読めるワンライン要約。ログやデバッグコンソール向け。"""
+        top_reasons = ", ".join(self.reason_codes[:5]) if self.reason_codes else "none"
+        scores_str = " ".join(
+            f"{k.replace('_score', '')}={v:.0f}" for k, v in sorted(self.sub_scores.items())
+        )
+        return (
+            f"[{self.symbol}] mode={self.mode.value} "
+            f"(raw={self.raw_mode.value}) "
+            f"score={self.cb_run_score:.1f} "
+            f"risk_mult={self.risk_multiplier:.2f} "
+            f"entry={'Y' if self.allow_new_entry else 'N'} "
+            f"| {scores_str} "
+            f"| reasons=[{top_reasons}]"
+        )

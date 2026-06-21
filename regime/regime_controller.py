@@ -4,8 +4,12 @@ FeatureCollector → SubScoreCalculator → raw_mode → PersistenceFilter
 のパイプラインを統括する。出力は BUY/SELL ではなく戦略許可/禁止。
 """
 
+import dataclasses
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from regime.feature_collector import FeatureCollector
 from regime.persistence_filter import PersistenceFilter
@@ -34,12 +38,13 @@ class RegimeControllerConfig:
 
     # 重み
     score_weights: Dict[str, float] = field(default_factory=lambda: {
-        "volatility_score": 0.20,
-        "trend_safety_score": 0.20,
-        "spread_score": 0.20,
-        "event_safety_score": 0.15,
-        "inventory_score": 0.15,
+        "volatility_score": 0.18,
+        "trend_safety_score": 0.18,
+        "spread_score": 0.18,
+        "event_safety_score": 0.13,
+        "inventory_score": 0.13,
         "execution_score": 0.10,
+        "cb_efficiency_score": 0.10,
     })
 
     # モード閾値
@@ -91,12 +96,14 @@ class RegimeController:
         account_state: Optional[Dict[str, Any]] = None,
         cb_config: Optional[Dict[str, Any]] = None,
         current_time_ms: Optional[int] = None,
+        minutes_to_high_impact_event: Optional[int] = None,
     ) -> RegimeDecision:
         """FeatureCollector → SubScoreCalculator → raw_mode → PersistenceFilter を実行する。
 
         config.enabled=False の場合は常に NORMAL を返す（旧挙動との互換性）。
         """
         if not self.config.enabled:
+            logger.debug("RegimeController disabled — returning NORMAL")
             return self._disabled_decision(symbol, current_time_ms)
 
         # 1. 特徴量収集
@@ -110,17 +117,27 @@ class RegimeController:
             account_state=account_state,
             cb_config=cb_config,
             current_time_ms=current_time_ms,
+            minutes_to_high_impact_event=minutes_to_high_impact_event,
         )
 
         # 2. サブスコア計算
         sub_scores, reason_codes = self.scorer.calculate(features)
         cb_run_score = self.scorer.aggregate(sub_scores, self.config.score_weights)
+        logger.debug(
+            "[%s] sub_scores=%s cb_run_score=%.2f missing=%s",
+            symbol, sub_scores, cb_run_score, features.missing_fields,
+        )
 
         # 3. raw_mode 判定
         raw_mode = self._decide_raw_mode(features, sub_scores, cb_run_score, reason_codes)
 
         # 4. Persistence filter
         confirmed_mode = self.persistence_filter.update(raw_mode)
+        if confirmed_mode != raw_mode:
+            logger.info(
+                "[%s] PersistenceFilter: raw=%s → confirmed=%s",
+                symbol, raw_mode.value, confirmed_mode.value,
+            )
 
         # 5. RegimeDecision に変換
         return self._build_decision(
@@ -242,20 +259,12 @@ class RegimeController:
     @staticmethod
     def _features_to_dict(features: RegimeFeatures) -> Dict[str, Any]:
         """RegimeFeatures を flat dict に変換する（ログ用）。"""
+        _SKIP = {"symbol", "timestamp", "missing_fields"}
         d = {}
-        for field_name in [
-            "atr", "atr_pct", "realized_volatility", "range_ratio",
-            "trend_strength", "adx", "ma_slope", "consecutive_directional_bars",
-            "spread", "spread_avg", "spread_ratio",
-            "hour", "weekday", "minutes_to_high_impact_event",
-            "floating_pnl", "floating_pnl_velocity", "inventory_imbalance",
-            "margin_level", "open_position_count", "long_lots", "short_lots", "net_lots",
-            "slippage_avg", "order_reject_rate", "fill_rate",
-            "rebate_per_lot", "cost_per_lot", "cb_edge_per_lot",
-            "existing_layer3_regime",
-        ]:
-            val = getattr(features, field_name, None)
+        for f in dataclasses.fields(features):
+            if f.name in _SKIP:
+                continue
+            val = features.__dict__.get(f.name)
             if val is not None:
-                # enum や float は素直に突っ込める
-                d[field_name] = val
+                d[f.name] = val
         return d
