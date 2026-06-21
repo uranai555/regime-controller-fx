@@ -396,6 +396,9 @@ class HMMModel:
     def fit(self, observations: List[List[float]]) -> bool:
         """観測系列で HMM を学習する。
 
+        学習後に状態をボラティリティ順に自動ソートする。
+        state 0 = 最低ボラ (NORMAL), state N-1 = 最高ボラ (危険)
+
         Args:
             observations: T×D の特徴量行列。
                 D=3 の場合: [returns, volatility, spread_ratio]
@@ -403,7 +406,10 @@ class HMMModel:
         Returns:
             True if converged
         """
-        return self._hmm.fit(observations)
+        result = self._hmm.fit(observations)
+        if self._hmm.is_fitted:
+            self._sort_states_by_volatility()
+        return result
 
     def predict(self, observations: List[List[float]]) -> Optional[int]:
         """最新タイムステップの状態を返す。未学習なら None。"""
