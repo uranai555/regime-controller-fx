@@ -1,7 +1,7 @@
 """types.py — RegimeController のデータ型定義
 
 Phase 1: ルールベースの cb_run_score + persistence filter
-Phase 2: GaussianHMM による隠れ状態推定（学習済みモデルがなければ Phase 1 にフォールバック）
+Phase 2: HMM (GaussianHMM) によるレジーム分類
 Phase 3: ブローカー別 Execution Quality Model
 
 このモジュールには全てのデータクラスと enum を集約し、
@@ -99,20 +99,30 @@ class RegimeFeatures:
     spread_series: Optional[List[float]] = None
     volume_series: Optional[List[float]] = None
 
-    # ── Phase 2: HMM output (populated by HMMModel) ──
+    # ── Phase 2: HMM output (populated by HMMModel / HMMRegimeClassifier) ──
     hmm_state: Optional[int] = None
     hmm_state_proba: Optional[List[float]] = None
+    hmm_regime_state: Optional[str] = None       # HMMRegimeState value
+    hmm_regime_probabilities: Optional[Dict[str, float]] = None
+    hmm_log_likelihood: Optional[float] = None
 
     # ── Phase 3: Broker / Account identification ──
     broker_id: Optional[str] = None
     account_id: Optional[str] = None
     server_name: Optional[str] = None
 
-    # ── Phase 3: Broker execution history (populated by ExecutionQualityModel) ──
+    # ── Phase 3: Broker execution history ──
     broker_slippage_avg: Optional[float] = None
     broker_reject_rate: Optional[float] = None
     broker_fill_rate: Optional[float] = None
     broker_execution_score: Optional[float] = None
+    broker_quality_score: Optional[float] = None
+    broker_slippage_mean: Optional[float] = None
+    broker_slippage_p95: Optional[float] = None
+    broker_latency_p95_ms: Optional[float] = None
+    broker_requote_rate: Optional[float] = None
+    broker_spread_markup: Optional[float] = None
+    broker_hourly_quality_factor: Optional[float] = None
 
     # ── 欠損追跡 ──
     missing_fields: List[str] = field(default_factory=list)
@@ -147,7 +157,7 @@ class RegimeDecision:
     symbol: str = ""
 
     def debug_summary(self) -> str:
-        """人間が読めるワンライン要約。ログやデバッグコンソール向け。"""
+        """人が読めるワンライン要約。ログやデバッグコンソール向け。"""
         top_reasons = ", ".join(self.reason_codes[:5]) if self.reason_codes else "none"
         scores_str = " ".join(
             f"{k.replace('_score', '')}={v:.0f}" for k, v in sorted(self.sub_scores.items())

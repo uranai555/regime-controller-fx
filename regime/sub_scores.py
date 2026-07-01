@@ -1,8 +1,11 @@
-"""sub_scores.py — RegimeFeatures から 6つのサブスコア + cb_run_score を計算する
+"""sub_scores.py — RegimeFeatures からサブスコア + cb_run_score を計算する
 
 各サブスコアは 0〜100。100 = 良好（正常稼働可能）、0 = 危険（停止）。
 
-Phase 1 ではルールベース。全てのパラメータは config で上書き可能。
+Phase 1: ルールベース (6 + cb_efficiency)
+Phase 2: hmm_regime_score 追加
+Phase 3: broker_quality_score で execution_score を拡張
+全てのパラメータは config で上書き可能。
 """
 
 from dataclasses import dataclass, field
@@ -64,6 +67,15 @@ class ScoreConfig:
     cb_edge_good: float = 0.5
     cb_default: int = 70
 
+    # hmm_regime_score (Phase 2)
+    hmm_low_vol_score: float = 100.0
+    hmm_trending_score: float = 55.0
+    hmm_high_vol_score: float = 15.0
+    hmm_default: int = 70
+
+    # broker_quality_score (Phase 3)
+    broker_default: int = 80
+
 
 # ── Reason Code 定数 ──
 
@@ -107,6 +119,14 @@ RC_FILL_LOW = "FILL_RATE_LOW"
 RC_CB_DEFAULTED = "CB_SCORE_DEFAULTED"
 RC_CB_NEGATIVE = "CB_EDGE_NEGATIVE"
 
+# HMM (Phase 2)
+RC_HMM_DEFAULTED = "HMM_SCORE_DEFAULTED"
+RC_HMM_HIGH_VOL = "HMM_HIGH_VOL_REGIME"
+RC_HMM_TRENDING = "HMM_TRENDING_REGIME"
+
+# Broker Quality (Phase 3)
+RC_BROKER_DEFAULTED = "BROKER_QUALITY_SCORE_DEFAULTED"
+
 
 class SubScoreCalculator:
     """RegimeFeatures からサブスコアと reason codes を計算する。
@@ -143,6 +163,14 @@ class SubScoreCalculator:
         sub_scores["cb_efficiency_score"], codes = self._cb_efficiency_score(features)
         reason_codes.extend(codes)
 
+        # Phase 2: HMM regime score
+        sub_scores["hmm_regime_score"], codes = self._hmm_regime_score(features)
+        reason_codes.extend(codes)
+
+        # Phase 3: Broker quality score
+        sub_scores["broker_quality_score"], codes = self._broker_quality_score(features)
+        reason_codes.extend(codes)
+
         return sub_scores, reason_codes
 
     def aggregate(
@@ -153,13 +181,15 @@ class SubScoreCalculator:
         """重み付き平均で cb_run_score を計算する。"""
         if weights is None:
             weights = {
-                "volatility_score": 0.18,
-                "trend_safety_score": 0.18,
+                "volatility_score": 0.15,
+                "trend_safety_score": 0.10,
                 "spread_score": 0.18,
                 "event_safety_score": 0.13,
                 "inventory_score": 0.13,
-                "execution_score": 0.10,
-                "cb_efficiency_score": 0.10,
+                "execution_score": 0.08,
+                "cb_efficiency_score": 0.08,
+                "hmm_regime_score": 0.08,
+                "broker_quality_score": 0.07,
             }
 
         score = 0.0
@@ -388,3 +418,46 @@ class SubScoreCalculator:
             return 55.0, codes
 
         return 100.0, codes
+
+    def _hmm_regime_score(
+        self, features: RegimeFeatures
+    ) -> Tuple[float, List[str]]:
+        """Phase 2: HMM 推定レジーム状態からスコア化。
+
+        HMM が利用不可または未学習の場合はデフォルト値を返す。
+        """
+        codes: List[str] = []
+
+        state = features.hmm_regime_state
+        if state is None:
+            codes.append(RC_HMM_DEFAULTED)
+            return self.cfg.hmm_default, codes
+
+        if state == "LOW_VOL":
+            return self.cfg.hmm_low_vol_score, codes
+        if state == "TRENDING":
+            codes.append(RC_HMM_TRENDING)
+            return self.cfg.hmm_trending_score, codes
+        if state == "HIGH_VOL":
+            codes.append(RC_HMM_HIGH_VOL)
+            return self.cfg.hmm_high_vol_score, codes
+
+        # UNKNOWN or unrecognized
+        codes.append(RC_HMM_DEFAULTED)
+        return self.cfg.hmm_default, codes
+
+    def _broker_quality_score(
+        self, features: RegimeFeatures
+    ) -> Tuple[float, List[str]]:
+        """Phase 3: ブローカー品質モデルのスコアを返す。
+
+        BrokerQualityModel が事前に features.broker_quality_score に
+        値をセットしている場合はそれを使用。未セットならデフォルト。
+        """
+        codes: List[str] = []
+
+        if features.broker_quality_score is None:
+            codes.append(RC_BROKER_DEFAULTED)
+            return self.cfg.broker_default, codes
+
+        return features.broker_quality_score, codes

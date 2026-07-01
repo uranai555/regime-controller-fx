@@ -8,4 +8,8 @@ setup(
     packages=find_packages(),
     python_requires=">=3.10",
     install_requires=[],
+    extras_require={
+        "hmm": ["numpy>=1.24", "hmmlearn>=0.3"],
+        "all": ["numpy>=1.24", "hmmlearn>=0.3"],
+    },
 )

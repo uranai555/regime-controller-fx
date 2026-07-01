@@ -2,7 +2,7 @@
 
 FX/CB回収EA向け。
 Phase 1: ルールベースの cb_run_score + persistence filter
-Phase 2: GaussianHMM による隠れ状態推定（学習済みモデルがなければ Phase 1 にフォールバック）
+Phase 2: HMM (GaussianHMM) によるレジーム分類
 Phase 3: ブローカー別 Execution Quality Model
 """
 
@@ -18,6 +18,18 @@ from regime.execution_quality_model import (
     ExecutionQualityConfig,
     ExecutionRecord,
 )
+from regime.hmm_regime import (
+    HMMRegimeClassifier,
+    HMMConfig as HMMRegimeConfig,
+    HMMRegimeState,
+    HMMResult,
+)
+from regime.broker_model import (
+    BrokerQualityModel,
+    BrokerModelConfig,
+    BrokerProfile,
+    ExecutionEvent,
+)
 
 __all__ = [
     "RegimeController",
@@ -28,10 +40,22 @@ __all__ = [
     "RegimeMode",
     "PersistenceFilter",
     "PersistenceFilterState",
+    # Phase 2 (PR#2 modules)
     "HMMModel",
     "HMMConfig",
     "GaussianHMM",
+    # Phase 2 (HMMRegimeClassifier)
+    "HMMRegimeClassifier",
+    "HMMRegimeConfig",
+    "HMMRegimeState",
+    "HMMResult",
+    # Phase 3 (PR#2 modules)
     "ExecutionQualityModel",
     "ExecutionQualityConfig",
     "ExecutionRecord",
+    # Phase 3 (BrokerQualityModel)
+    "BrokerQualityModel",
+    "BrokerModelConfig",
+    "BrokerProfile",
+    "ExecutionEvent",
 ]
