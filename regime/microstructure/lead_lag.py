@@ -105,6 +105,7 @@ class PassiveMarkout:
     horizon_ms: int
     gross_markout: float
     gross_markout_points: float
+    entry_spread_points: float = 0.0
 
 
 def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int) -> PassiveMarkout | None:
@@ -127,13 +128,12 @@ def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], c
         horizon_ms=horizon_ms,
         gross_markout=gross,
         gross_markout_points=gross / event.point,
+        entry_spread_points=(event.ask - event.bid) / event.point,
     )
 
 
 def passive_stale_markout(leader_event: PriceEvent, target_source_id: str, target_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int) -> PassiveMarkout | None:
-    """Theoretical markout available on a follower's stale quote at leader-event time."""
-    # Cross-terminal ordering inside the same GetTickCount millisecond is unknown.
-    # Use the last strictly earlier follower quote to avoid look-ahead.
+    """Theoretical markout available on a follower's still-stale quote at leader-event time."""
     target_tick = tick_strictly_before(target_ticks, leader_event.t_ms)
     future_mid = consensus_mid_at(consensus_streams, leader_event.t_ms + horizon_ms)
     if target_tick is None or future_mid is None:
@@ -149,4 +149,5 @@ def passive_stale_markout(leader_event: PriceEvent, target_source_id: str, targe
         horizon_ms=horizon_ms,
         gross_markout=gross,
         gross_markout_points=gross / target_tick.point,
+        entry_spread_points=target_tick.spread_points,
     )

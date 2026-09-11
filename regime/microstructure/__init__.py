@@ -3,6 +3,7 @@
 from .clock import TickCountExtender
 from .event_match import EventMatch, PriceEvent, detect_price_events, match_events
 from .fingerprint import BrokerFingerprint, build_fingerprint
+from .friction import CostScenario, StressResult, default_scenarios, net_points, stress_markouts
 from .ingest import TickLogError, encode_header, encode_record, load_ticks, loads_ticks
 from .hy import HYResult, estimate_hy_lead_lag, hy_contrast
 from .lead_lag import PairLagStats, PassiveMarkout, pairwise_lag_matrix, passive_markout, passive_stale_markout
@@ -13,5 +14,5 @@ __all__ = [
     "encode_header", "encode_record", "load_ticks", "loads_ticks",
     "PriceEvent", "EventMatch", "detect_price_events", "match_events",
     "PairLagStats", "PassiveMarkout", "pairwise_lag_matrix", "passive_markout", "passive_stale_markout",
-    "BrokerFingerprint", "build_fingerprint", "HYResult", "estimate_hy_lead_lag", "hy_contrast",
+    "BrokerFingerprint", "build_fingerprint", "CostScenario", "StressResult", "default_scenarios", "net_points", "stress_markouts", "HYResult", "estimate_hy_lead_lag", "hy_contrast",
 ]

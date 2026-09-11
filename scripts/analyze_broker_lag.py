@@ -24,6 +24,8 @@ def main() -> int:
     p.add_argument("--output-dir", default="output/microstructure")
     p.add_argument("--min-move-points", type=float, default=1.0)
     p.add_argument("--spread-fraction", type=float, default=0.5)
+    p.add_argument("--commission-points", type=float, default=0.0)
+    p.add_argument("--cashback-points", type=float, default=0.0)
     args = p.parse_args()
     if len(args.source) < 2:
         p.error("at least two --source arguments are required")
@@ -33,6 +35,8 @@ def main() -> int:
         output_dir=args.output_dir,
         min_move_points=args.min_move_points,
         spread_fraction=args.spread_fraction,
+        commission_points=args.commission_points,
+        cashback_points=args.cashback_points,
     )
     print(f"brokers={len(fps)} pairs={len(stats)} verdict={verdict}")
     print(Path(args.output_dir).resolve())

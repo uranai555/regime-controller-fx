@@ -23,6 +23,7 @@ def test_pipeline_writes_required_outputs(tmp_path: Path):
     assert (tmp_path / "broker_lag_matrix.csv").exists()
     assert (tmp_path / "broker_fingerprint.json").exists()
     assert (tmp_path / "microstructure_report.md").exists()
+    assert (tmp_path / "cost_stress.json").exists()
     ab = next(s for s in stats if s.leader == "A" and s.follower == "B")
     assert ab.median_lag_ms == 40
     assert verdict == "DATA_INSUFFICIENT"
