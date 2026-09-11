@@ -19,6 +19,7 @@ class PriceEvent:
     mid: float
     threshold: float
     point: float
+    t_local_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ def detect_price_events(ticks: Sequence[NormalizedTick], *, min_move_points: flo
                 mid=tick.mid,
                 threshold=threshold,
                 point=tick.point,
+                t_local_s=tick.t_local_s,
             ))
         prev = tick
     return events

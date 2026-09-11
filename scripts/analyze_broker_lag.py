@@ -26,6 +26,9 @@ def main() -> int:
     p.add_argument("--spread-fraction", type=float, default=0.5)
     p.add_argument("--commission-points", type=float, default=0.0)
     p.add_argument("--cashback-points", type=float, default=0.0)
+    p.add_argument("--stability-window-min", type=float, default=30.0)
+    p.add_argument("--stability-min-events", type=int, default=5)
+    p.add_argument("--bootstrap-resamples", type=int, default=1000)
     args = p.parse_args()
     if len(args.source) < 2:
         p.error("at least two --source arguments are required")
@@ -37,6 +40,9 @@ def main() -> int:
         spread_fraction=args.spread_fraction,
         commission_points=args.commission_points,
         cashback_points=args.cashback_points,
+        stability_window_ms=int(args.stability_window_min * 60_000),
+        stability_min_events=args.stability_min_events,
+        bootstrap_resamples=args.bootstrap_resamples,
     )
     print(f"brokers={len(fps)} pairs={len(stats)} verdict={verdict}")
     print(Path(args.output_dir).resolve())

@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 from .fingerprint import BrokerFingerprint
 from .friction import StressResult
 from .lead_lag import PairLagStats
+from .stability import PairStability
 
 VERDICTS = {"NO_EDGE", "OBSERVATIONAL_EDGE_ONLY", "CANDIDATE_FOR_EXECUTION_PROBE", "DATA_INSUFFICIENT"}
 
@@ -42,27 +43,41 @@ def write_cost_stress(path: str | Path, stress: Mapping[str, Sequence[StressResu
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
+def write_stability(path: str | Path, stability: Sequence[PairStability]) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        json.dump([row.to_dict() for row in stability], f, indent=2, ensure_ascii=False)
+
+
 def choose_verdict(
     fps: Sequence[BrokerFingerprint],
     *,
     min_ticks: int = 100_000,
     stress: Mapping[str, Sequence[StressResult]] | None = None,
+    stability: Sequence[PairStability] | None = None,
     conservative_scenario: str = "slippage_1.0x_spread",
+    min_stable_window_share: float = 0.60,
 ) -> str:
     if len(fps) < 2 or any(fp.ticks < min_ticks for fp in fps):
         return "DATA_INSUFFICIENT"
     evs = [fp.theoretical_ev_100ms_points for fp in fps if fp.theoretical_ev_100ms_points is not None]
     if not evs or max(evs) <= 0:
         return "NO_EDGE"
-    if stress is not None:
-        stressed_positive = set()
-        for broker, rows in stress.items():
-            for row in rows:
-                if row.scenario == conservative_scenario and row.observations > 0 and row.mean_net_points > 0:
-                    stressed_positive.add(broker)
-        leader_exists = any(fp.leader_share >= 0.6 for fp in fps)
-        return "CANDIDATE_FOR_EXECUTION_PROBE" if leader_exists and stressed_positive else "OBSERVATIONAL_EDGE_ONLY"
-    return "OBSERVATIONAL_EDGE_ONLY"
+    if stress is None or stability is None:
+        return "OBSERVATIONAL_EDGE_ONLY"
+    stressed_positive = set()
+    for broker, rows in stress.items():
+        for row in rows:
+            if row.scenario == conservative_scenario and row.observations > 0 and row.mean_net_points > 0:
+                stressed_positive.add(broker)
+    stable_pairs = [
+        row for row in stability
+        if row.windows >= 2
+        and row.positive_median_window_share >= min_stable_window_share
+        and row.follower in stressed_positive
+    ]
+    return "CANDIDATE_FOR_EXECUTION_PROBE" if stable_pairs else "OBSERVATIONAL_EDGE_ONLY"
 
 
 def write_markdown_report(
@@ -71,9 +86,10 @@ def write_markdown_report(
     stats: Sequence[PairLagStats],
     *,
     stress: Mapping[str, Sequence[StressResult]] | None = None,
+    stability: Sequence[PairStability] | None = None,
     verdict: str | None = None,
 ) -> str:
-    verdict = verdict or choose_verdict(fps, stress=stress)
+    verdict = verdict or choose_verdict(fps, stress=stress, stability=stability)
     if verdict not in VERDICTS:
         raise ValueError(f"invalid verdict: {verdict}")
     lines = [
@@ -89,6 +105,11 @@ def write_markdown_report(
     lines += ["", "## Pairwise lead/lag", "", "| Leader | Follower | Events | Match rate | Median lag ms | P95 lag ms | Positive lag share |", "|---|---|---:|---:|---:|---:|---:|"]
     for s in stats:
         lines.append(f"| {s.leader} | {s.follower} | {s.leader_events} | {s.match_rate:.1%} | {s.median_lag_ms:.1f} | {s.p95_lag_ms:.1f} | {s.positive_lag_share:.1%} |")
+    if stability:
+        lines += ["", "## Stability / bootstrap", "", "| Pair | Windows | Positive median-window share | Median window lag ms | Bootstrap median CI ms |", "|---|---:|---:|---:|---:|"]
+        for s in stability:
+            ci = "n/a" if s.lag_median_bootstrap_lo_ms is None else f"[{s.lag_median_bootstrap_lo_ms:.1f}, {s.lag_median_bootstrap_hi_ms:.1f}]"
+            lines.append(f"| {s.leader}→{s.follower} | {s.windows} | {s.positive_median_window_share:.1%} | {s.median_window_lag_ms:.1f} | {ci} |")
     if stress:
         lines += ["", "## Friction / cashback stress", "", "Gross markout already uses executable bid/ask. The slippage term below is an additional adverse-fill stress.", "", "| Broker | Scenario | N | Mean net pts | Median net pts | Positive rate | P05 | P95 |", "|---|---|---:|---:|---:|---:|---:|---:|"]
         for broker, rows in stress.items():
