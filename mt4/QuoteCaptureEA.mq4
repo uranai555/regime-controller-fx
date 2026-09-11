@@ -41,11 +41,12 @@ string SafeSourceId(string value)
 int OnInit()
 {
    if(FlushEveryN <= 0) return INIT_PARAMETERS_INCORRECT;
-   string ts = TimeToString(TimeLocal(), TIME_DATE|TIME_MINUTES);
+   string ts = TimeToString(TimeLocal(), TIME_DATE|TIME_SECONDS);
    StringReplace(ts, ".", "");
    StringReplace(ts, ":", "");
    StringReplace(ts, " ", "_");
-   string file_name = OutputPrefix + "_" + SafeSourceId(SourceId) + "_" + CanonicalSymbol + "_" + ts + ".bin";
+   string session_suffix = IntegerToString((int)GetTickCount());
+   string file_name = OutputPrefix + "_" + SafeSourceId(SourceId) + "_" + CanonicalSymbol + "_" + ts + "_" + session_suffix + ".bin";
    ResetLastError();
    g_handle = FileOpen(file_name, FILE_WRITE|FILE_BIN|FILE_COMMON);
    if(g_handle == INVALID_HANDLE)

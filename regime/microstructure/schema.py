@@ -32,6 +32,8 @@ class NormalizedTick:
     spread: float
     spread_points: float
     point: float
+    t_local_s: int | None = None
+    t_host_raw_ms: int | None = None
 
     @classmethod
     def from_raw(cls, raw: RawTick, *, source_id: str, symbol: str, t_host_ms: int) -> "NormalizedTick":
@@ -52,4 +54,6 @@ class NormalizedTick:
             spread=spread,
             spread_points=spread / raw.point,
             point=raw.point,
+            t_local_s=raw.local_time_sec,
+            t_host_raw_ms=raw.host_tick_ms_raw,
         )

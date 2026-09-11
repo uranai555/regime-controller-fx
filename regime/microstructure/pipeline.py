@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from .clock import align_stream_wrap_epochs
 from .event_match import detect_price_events, match_events
 from .fingerprint import BrokerFingerprint, build_fingerprint
 from .lead_lag import PairLagStats, passive_stale_markout, summarize_matches
@@ -20,6 +21,7 @@ def analyze_streams(
 ) -> tuple[list[PairLagStats], list[BrokerFingerprint], str]:
     if len(streams) < 2:
         raise ValueError("at least two broker streams are required")
+    streams = align_stream_wrap_epochs(streams)
     symbols = {ticks[0].symbol for ticks in streams.values() if ticks}
     if len(symbols) != 1 or any(not ticks for ticks in streams.values()):
         raise ValueError("all streams must be non-empty and share one canonical symbol")

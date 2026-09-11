@@ -74,6 +74,20 @@ def tick_at_or_before(ticks: Sequence[NormalizedTick], t_ms: int) -> NormalizedT
     return best
 
 
+def tick_strictly_before(ticks: Sequence[NormalizedTick], t_ms: int) -> NormalizedTick | None:
+    """Return last quote with timestamp < t_ms, never an ambiguous same-ms quote."""
+    lo, hi = 0, len(ticks) - 1
+    best = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if ticks[mid].t_host_ms < t_ms:
+            best = ticks[mid]
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def consensus_mid_at(streams: Mapping[str, Sequence[NormalizedTick]], t_ms: int) -> float | None:
     mids = []
     for ticks in streams.values():
@@ -94,27 +108,33 @@ class PassiveMarkout:
 
 
 def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int) -> PassiveMarkout | None:
-    source_tick = tick_at_or_before(source_ticks, event.t_ms)
+    """Markout from the quote that actually generated ``event``.
+
+    Do not look the source quote up again by millisecond timestamp: multiple quotes
+    may share a GetTickCount millisecond, which would introduce look-ahead.
+    """
     future_mid = consensus_mid_at(consensus_streams, event.t_ms + horizon_ms)
-    if source_tick is None or future_mid is None:
+    if future_mid is None:
         return None
     if event.direction > 0:
-        gross = future_mid - source_tick.ask
+        gross = future_mid - event.ask
     else:
-        gross = source_tick.bid - future_mid
+        gross = event.bid - future_mid
     return PassiveMarkout(
         source_id=event.source_id,
         event_t_ms=event.t_ms,
         direction=event.direction,
         horizon_ms=horizon_ms,
         gross_markout=gross,
-        gross_markout_points=gross / source_tick.point,
+        gross_markout_points=gross / event.point,
     )
 
 
 def passive_stale_markout(leader_event: PriceEvent, target_source_id: str, target_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int) -> PassiveMarkout | None:
-    """Theoretical markout available on a follower's still-stale quote at leader-event time."""
-    target_tick = tick_at_or_before(target_ticks, leader_event.t_ms)
+    """Theoretical markout available on a follower's stale quote at leader-event time."""
+    # Cross-terminal ordering inside the same GetTickCount millisecond is unknown.
+    # Use the last strictly earlier follower quote to avoid look-ahead.
+    target_tick = tick_strictly_before(target_ticks, leader_event.t_ms)
     future_mid = consensus_mid_at(consensus_streams, leader_event.t_ms + horizon_ms)
     if target_tick is None or future_mid is None:
         return None

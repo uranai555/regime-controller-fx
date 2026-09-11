@@ -55,3 +55,30 @@ def test_spread_aware_markout_can_reject_statistical_edge():
     m = passive_markout(e, b_ticks, consensus, horizon_ms=100)
     assert m is not None
     assert m.gross_markout_points < 0
+
+
+def test_event_quote_used_for_markout_when_same_ms_has_later_quote():
+    from regime.microstructure.event_match import PriceEvent
+    event = PriceEvent("B", "XAUUSD", 100, 1, 0.2, 99.9, 100.1, 100.0, 0.1, 0.1)
+    source = [
+        nt("B", 0, 99, 100.0, 0.2, 0.1),
+        NormalizedTick("B", "XAUUSD", 1, 100, None, 99.7, 99.9, 99.8, 0.2, 2.0, 0.1),
+    ]
+    consensus = {"A": [nt("A", 0, 200, 100.15, 0.2, 0.1)]}
+    m = passive_markout(event, source, consensus, horizon_ms=100)
+    assert m is not None
+    assert m.gross_markout == pytest.approx(0.05)
+
+
+def test_stale_markout_uses_strictly_prior_follower_quote():
+    from regime.microstructure.event_match import PriceEvent
+    from regime.microstructure.lead_lag import passive_stale_markout
+    leader_event = PriceEvent("A", "XAUUSD", 100, 1, 0.2, 100.0, 100.2, 100.1, 0.1, 0.1)
+    follower = [
+        nt("B", 0, 99, 100.0, 0.2, 0.1),
+        nt("B", 1, 100, 100.5, 0.2, 0.1),
+    ]
+    consensus = {"A": [nt("A", 0, 200, 100.4, 0.2, 0.1)]}
+    m = passive_stale_markout(leader_event, "B", follower, consensus, horizon_ms=100)
+    assert m is not None
+    assert m.gross_markout == pytest.approx(0.3)
