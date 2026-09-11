@@ -88,13 +88,26 @@ def tick_strictly_before(ticks: Sequence[NormalizedTick], t_ms: int) -> Normaliz
     return best
 
 
-def consensus_mid_at(streams: Mapping[str, Sequence[NormalizedTick]], t_ms: int) -> float | None:
+def consensus_mid_at(
+    streams: Mapping[str, Sequence[NormalizedTick]],
+    t_ms: int,
+    *,
+    max_age_ms: int = 250,
+    min_sources: int = 2,
+) -> float | None:
+    """Fresh multi-source consensus at or before ``t_ms``.
+
+    A quote older than ``max_age_ms`` is excluded so an ended/stalled stream is
+    never reused as a future-horizon price.
+    """
+    if max_age_ms < 0 or min_sources <= 0:
+        raise ValueError("max_age_ms must be >=0 and min_sources must be >0")
     mids = []
     for ticks in streams.values():
         tick = tick_at_or_before(ticks, t_ms)
-        if tick is not None:
+        if tick is not None and 0 <= t_ms - tick.t_host_ms <= max_age_ms:
             mids.append(tick.mid)
-    return median(mids) if mids else None
+    return median(mids) if len(mids) >= min_sources else None
 
 
 @dataclass(frozen=True)
@@ -108,19 +121,16 @@ class PassiveMarkout:
     entry_spread_points: float = 0.0
 
 
-def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int) -> PassiveMarkout | None:
-    """Markout from the quote that actually generated ``event``.
-
-    Do not look the source quote up again by millisecond timestamp: multiple quotes
-    may share a GetTickCount millisecond, which would introduce look-ahead.
-    """
-    future_mid = consensus_mid_at(consensus_streams, event.t_ms + horizon_ms)
+def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int, consensus_max_age_ms: int = 250, consensus_min_sources: int = 2) -> PassiveMarkout | None:
+    future_mid = consensus_mid_at(
+        consensus_streams,
+        event.t_ms + horizon_ms,
+        max_age_ms=consensus_max_age_ms,
+        min_sources=consensus_min_sources,
+    )
     if future_mid is None:
         return None
-    if event.direction > 0:
-        gross = future_mid - event.ask
-    else:
-        gross = event.bid - future_mid
+    gross = future_mid - event.ask if event.direction > 0 else event.bid - future_mid
     return PassiveMarkout(
         source_id=event.source_id,
         event_t_ms=event.t_ms,
@@ -132,16 +142,20 @@ def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], c
     )
 
 
-def passive_stale_markout(leader_event: PriceEvent, target_source_id: str, target_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int) -> PassiveMarkout | None:
+def passive_stale_markout(leader_event: PriceEvent, target_source_id: str, target_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int, consensus_max_age_ms: int = 250, consensus_min_sources: int = 2, max_entry_quote_age_ms: int = 1000) -> PassiveMarkout | None:
     """Theoretical markout available on a follower's still-stale quote at leader-event time."""
     target_tick = tick_strictly_before(target_ticks, leader_event.t_ms)
-    future_mid = consensus_mid_at(consensus_streams, leader_event.t_ms + horizon_ms)
-    if target_tick is None or future_mid is None:
+    if target_tick is None or leader_event.t_ms - target_tick.t_host_ms > max_entry_quote_age_ms:
         return None
-    if leader_event.direction > 0:
-        gross = future_mid - target_tick.ask
-    else:
-        gross = target_tick.bid - future_mid
+    future_mid = consensus_mid_at(
+        consensus_streams,
+        leader_event.t_ms + horizon_ms,
+        max_age_ms=consensus_max_age_ms,
+        min_sources=consensus_min_sources,
+    )
+    if future_mid is None:
+        return None
+    gross = future_mid - target_tick.ask if leader_event.direction > 0 else target_tick.bid - future_mid
     return PassiveMarkout(
         source_id=target_source_id,
         event_t_ms=leader_event.t_ms,

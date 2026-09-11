@@ -25,6 +25,9 @@ def analyze_streams(
     stability_window_ms: int = 30 * 60 * 1000,
     stability_min_events: int = 5,
     bootstrap_resamples: int = 1000,
+    consensus_max_age_ms: int = 250,
+    consensus_min_sources: int = 2,
+    max_entry_quote_age_ms: int = 1000,
 ) -> tuple[list[PairLagStats], list[BrokerFingerprint], str]:
     if len(streams) < 2:
         raise ValueError("at least two broker streams are required")
@@ -32,10 +35,7 @@ def analyze_streams(
     symbols = {ticks[0].symbol for ticks in streams.values() if ticks}
     if len(symbols) != 1 or any(not ticks for ticks in streams.values()):
         raise ValueError("all streams must be non-empty and share one canonical symbol")
-    events = {
-        sid: detect_price_events(ticks, min_move_points=min_move_points, spread_fraction=spread_fraction)
-        for sid, ticks in streams.items()
-    }
+    events = {sid: detect_price_events(ticks, min_move_points=min_move_points, spread_fraction=spread_fraction) for sid, ticks in streams.items()}
     stats: list[PairLagStats] = []
     stability: list[PairStability] = []
     markouts_by_target = {sid: [] for sid in streams}
@@ -46,9 +46,7 @@ def analyze_streams(
             matches = match_events(leader_events, follower_events)
             stats.append(summarize_matches(leader, follower, len(leader_events), matches))
             stability.append(summarize_pair_stability(
-                leader,
-                follower,
-                matches,
+                leader, follower, matches,
                 window_ms=stability_window_ms,
                 min_events_per_window=stability_min_events,
                 bootstrap_resamples=bootstrap_resamples,
@@ -56,7 +54,13 @@ def analyze_streams(
             for match in matches:
                 if match.lag_ms <= 0:
                     continue
-                m = passive_stale_markout(match.leader, follower, streams[follower], streams, horizon_ms=markout_horizon_ms)
+                m = passive_stale_markout(
+                    match.leader, follower, streams[follower], streams,
+                    horizon_ms=markout_horizon_ms,
+                    consensus_max_age_ms=consensus_max_age_ms,
+                    consensus_min_sources=consensus_min_sources,
+                    max_entry_quote_age_ms=max_entry_quote_age_ms,
+                )
                 if m is not None:
                     markouts_by_target[follower].append(m)
     fps = [build_fingerprint(sid, ticks, stats, markouts_by_target[sid]) for sid, ticks in streams.items()]

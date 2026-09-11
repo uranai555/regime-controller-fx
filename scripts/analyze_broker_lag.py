@@ -29,6 +29,9 @@ def main() -> int:
     p.add_argument("--stability-window-min", type=float, default=30.0)
     p.add_argument("--stability-min-events", type=int, default=5)
     p.add_argument("--bootstrap-resamples", type=int, default=1000)
+    p.add_argument("--consensus-max-age-ms", type=int, default=250)
+    p.add_argument("--consensus-min-sources", type=int, default=2)
+    p.add_argument("--max-entry-quote-age-ms", type=int, default=1000)
     args = p.parse_args()
     if len(args.source) < 2:
         p.error("at least two --source arguments are required")
@@ -43,6 +46,9 @@ def main() -> int:
         stability_window_ms=int(args.stability_window_min * 60_000),
         stability_min_events=args.stability_min_events,
         bootstrap_resamples=args.bootstrap_resamples,
+        consensus_max_age_ms=args.consensus_max_age_ms,
+        consensus_min_sources=args.consensus_min_sources,
+        max_entry_quote_age_ms=args.max_entry_quote_age_ms,
     )
     print(f"brokers={len(fps)} pairs={len(stats)} verdict={verdict}")
     print(Path(args.output_dir).resolve())
