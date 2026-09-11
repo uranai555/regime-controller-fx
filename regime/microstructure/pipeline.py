@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Mapping, Sequence
+
+from .event_match import detect_price_events, match_events
+from .fingerprint import BrokerFingerprint, build_fingerprint
+from .lead_lag import PairLagStats, passive_stale_markout, summarize_matches
+from .report import write_fingerprints, write_lag_matrix, write_markdown_report
+from .schema import NormalizedTick
+
+
+def analyze_streams(
+    streams: Mapping[str, Sequence[NormalizedTick]],
+    *,
+    output_dir: str | Path,
+    min_move_points: float = 1.0,
+    spread_fraction: float = 0.5,
+    markout_horizon_ms: int = 100,
+) -> tuple[list[PairLagStats], list[BrokerFingerprint], str]:
+    if len(streams) < 2:
+        raise ValueError("at least two broker streams are required")
+    symbols = {ticks[0].symbol for ticks in streams.values() if ticks}
+    if len(symbols) != 1 or any(not ticks for ticks in streams.values()):
+        raise ValueError("all streams must be non-empty and share one canonical symbol")
+
+    events = {
+        sid: detect_price_events(ticks, min_move_points=min_move_points, spread_fraction=spread_fraction)
+        for sid, ticks in streams.items()
+    }
+    stats: list[PairLagStats] = []
+    markouts_by_target = {sid: [] for sid in streams}
+
+    for leader, leader_events in events.items():
+        for follower, follower_events in events.items():
+            if leader == follower:
+                continue
+            matches = match_events(leader_events, follower_events)
+            stats.append(summarize_matches(leader, follower, len(leader_events), matches))
+            for match in matches:
+                if match.lag_ms <= 0:
+                    continue
+                m = passive_stale_markout(
+                    match.leader,
+                    follower,
+                    streams[follower],
+                    streams,
+                    horizon_ms=markout_horizon_ms,
+                )
+                if m is not None:
+                    markouts_by_target[follower].append(m)
+
+    fps = [
+        build_fingerprint(sid, ticks, stats, markouts_by_target[sid])
+        for sid, ticks in streams.items()
+    ]
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    write_lag_matrix(out / "broker_lag_matrix.csv", stats)
+    write_fingerprints(out / "broker_fingerprint.json", fps)
+    verdict = write_markdown_report(out / "microstructure_report.md", fps, stats)
+    return stats, fps, verdict

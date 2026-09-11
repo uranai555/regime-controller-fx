@@ -110,3 +110,23 @@ def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], c
         gross_markout=gross,
         gross_markout_points=gross / source_tick.point,
     )
+
+
+def passive_stale_markout(leader_event: PriceEvent, target_source_id: str, target_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int) -> PassiveMarkout | None:
+    """Theoretical markout available on a follower's still-stale quote at leader-event time."""
+    target_tick = tick_at_or_before(target_ticks, leader_event.t_ms)
+    future_mid = consensus_mid_at(consensus_streams, leader_event.t_ms + horizon_ms)
+    if target_tick is None or future_mid is None:
+        return None
+    if leader_event.direction > 0:
+        gross = future_mid - target_tick.ask
+    else:
+        gross = target_tick.bid - future_mid
+    return PassiveMarkout(
+        source_id=target_source_id,
+        event_t_ms=leader_event.t_ms,
+        direction=leader_event.direction,
+        horizon_ms=horizon_ms,
+        gross_markout=gross,
+        gross_markout_points=gross / target_tick.point,
+    )
