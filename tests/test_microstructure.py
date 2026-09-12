@@ -73,7 +73,8 @@ def test_neighboring_jitter_bins_form_one_lag_peak():
     assert estimate.coverage == pytest.approx(1.0)
     matches = match_events(leaders, followers, min_lag_ms=0, max_lag_ms=100)
     assert len(matches) == 20
-    assert 39 <= pytest.approx(sum(m.lag_ms for m in matches) / len(matches), abs=2) <= 43
+    avg_lag = sum(m.lag_ms for m in matches) / len(matches)
+    assert 39 <= avg_lag <= 43
 
 
 def test_same_ms_burst_does_not_cartesian_inflate_coverage():
