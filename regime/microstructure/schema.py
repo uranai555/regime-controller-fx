@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -37,10 +38,16 @@ class NormalizedTick:
 
     @classmethod
     def from_raw(cls, raw: RawTick, *, source_id: str, symbol: str, t_host_ms: int) -> "NormalizedTick":
-        if raw.point <= 0:
-            raise ValueError("point must be > 0")
+        if not math.isfinite(raw.point) or raw.point <= 0:
+            raise ValueError("point must be finite and > 0")
+        if not (math.isfinite(raw.bid) and math.isfinite(raw.ask)):
+            raise ValueError("bid/ask must be finite")
         if not (raw.bid > 0 and raw.ask > 0 and raw.ask >= raw.bid):
             raise ValueError("invalid bid/ask")
+        if raw.last is not None and not math.isfinite(raw.last):
+            raise ValueError("last must be finite when present")
+        if raw.digits < 0:
+            raise ValueError("digits must be >= 0")
         spread = raw.ask - raw.bid
         return cls(
             source_id=source_id,
