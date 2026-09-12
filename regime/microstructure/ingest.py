@@ -70,7 +70,7 @@ def iter_raw_ticks(stream: BinaryIO) -> Iterable[RawTick]:
     if record_size != RECORD_SIZE:
         raise TickLogError(f"record size mismatch: file={record_size}, expected={RECORD_SIZE}")
 
-    last_seq: int | None = None
+    expected_seq = 0
     while True:
         chunk = stream.read(RECORD_SIZE)
         if not chunk:
@@ -78,9 +78,11 @@ def iter_raw_ticks(stream: BinaryIO) -> Iterable[RawTick]:
         if len(chunk) != RECORD_SIZE:
             raise TickLogError("truncated final record")
         raw = _decode_record(chunk)
-        if last_seq is not None and raw.sequence <= last_seq:
-            raise TickLogError(f"non-increasing sequence: {last_seq} -> {raw.sequence}")
-        last_seq = raw.sequence
+        if raw.sequence != expected_seq:
+            raise TickLogError(
+                f"non-contiguous sequence: expected={expected_seq}, got={raw.sequence}"
+            )
+        expected_seq += 1
         yield raw
 
 
