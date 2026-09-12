@@ -38,6 +38,15 @@ def test_known_lag_recovery():
     assert next(s for s in stats if s.leader=="A" and s.follower=="C").median_lag_ms == pytest.approx(95)
 
 
+def test_dense_periodic_events_do_not_flip_true_leader():
+    stats = pairwise_lag_matrix({"A": synthetic(0,"A"), "C": synthetic(95,"C")}, min_move_points=5, spread_fraction=0.0)
+    a_to_c = next(s for s in stats if s.leader == "A" and s.follower == "C")
+    c_to_a = next(s for s in stats if s.leader == "C" and s.follower == "A")
+    assert a_to_c.median_lag_ms == pytest.approx(95)
+    assert c_to_a.median_lag_ms == pytest.approx(-95)
+    assert c_to_a.positive_lag_share == 0.0
+
+
 def test_spread_aware_markout_can_reject_statistical_edge():
     b = [nt("B",0,0,100.0), nt("B",1,200,100.05)]
     e = detect_price_events([nt("B",0,0,100.0), nt("B",1,10,100.2)], min_move_points=1, spread_fraction=0.0)[0]
