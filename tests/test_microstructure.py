@@ -33,7 +33,7 @@ def test_tickcount_wrap_and_backward_rejection():
 
 
 def test_binary_roundtrip_and_truncated_fail_closed():
-    raw = RawTick(1, 123, 999, 10, 11, 100.0, 100.2, None, 7, 0.1, 1, 0)
+    raw = RawTick(0, 123, 999, 10, 11, 100.0, 100.2, None, 7, 0.1, 1, 0)
     data = encode_header() + encode_record(raw)
     out = loads_ticks(data, source_id="A", symbol="XAUUSD")
     assert len(out) == 1 and out[0].spread_points == pytest.approx(2.0)
