@@ -92,9 +92,9 @@ def test_same_ms_burst_does_not_cartesian_inflate_coverage():
 
 
 def test_spread_aware_markout_can_reject_statistical_edge():
-    b = [nt("B",0,0,100.0), nt("B",1,200,100.05)]
+    b = [nt("B",0,0,100.0), nt("B",1,109,100.05), nt("B",2,111,100.05)]
     e = detect_price_events([nt("B",0,0,100.0), nt("B",1,10,100.2)], min_move_points=1, spread_fraction=0.0)[0]
-    consensus={"A":[nt("A",0,0,100.0),nt("A",1,100,100.05)],"B":b}
+    consensus={"A":[nt("A",0,0,100.0),nt("A",1,109,100.05),nt("A",2,111,100.05)],"B":b}
     m=passive_markout(e,b,consensus,horizon_ms=100)
     assert m is not None and m.gross_markout_points < 0
 
@@ -102,7 +102,8 @@ def test_spread_aware_markout_can_reject_statistical_edge():
 def test_event_quote_used_when_same_ms_has_later_quote():
     event=PriceEvent("B","XAUUSD",100,1,.2,99.9,100.1,100.0,.1,.1)
     source=[nt("B",0,99,100.0), NormalizedTick("B","XAUUSD",1,100,None,99.7,99.9,99.8,.2,2.0,.1)]
-    m=passive_markout(event,source,{"A":[nt("A",0,200,100.15)]},horizon_ms=100,consensus_min_sources=1)
+    consensus={"A":[nt("A",0,199,100.15),nt("A",1,201,100.15)]}
+    m=passive_markout(event,source,consensus,horizon_ms=100,consensus_min_sources=1)
     assert m is not None and m.gross_markout == pytest.approx(.05)
 
 
@@ -110,8 +111,24 @@ def test_stale_markout_uses_strictly_prior_follower_quote():
     from regime.microstructure.lead_lag import passive_stale_markout
     leader=PriceEvent("A","XAUUSD",100,1,.2,100.0,100.2,100.1,.1,.1)
     follower=[nt("B",0,99,100.0),nt("B",1,100,100.5)]
-    m=passive_stale_markout(leader,"B",follower,{"A":[nt("A",0,200,100.4)]},horizon_ms=100,consensus_min_sources=1)
+    consensus={"A":[nt("A",0,199,100.4),nt("A",1,201,100.4)]}
+    m=passive_stale_markout(leader,"B",follower,consensus,horizon_ms=100,consensus_min_sources=1)
     assert m is not None and m.gross_markout == pytest.approx(.3)
+
+
+def test_horizon_exact_ms_quote_is_not_used():
+    event=PriceEvent("B","XAUUSD",100,1,.2,99.9,100.1,100.0,.1,.1)
+    # The exact-200 quote is ambiguous across terminals. The 199 quote is the
+    # last safely ordered price, while 201 only proves capture continued.
+    consensus={"A":[nt("A",0,199,100.10),nt("A",1,200,101.00),nt("A",2,201,101.00)]}
+    m=passive_markout(event,[],consensus,horizon_ms=100,consensus_min_sources=1)
+    assert m is not None and m.gross_markout == pytest.approx(0.0)
+
+
+def test_markout_rejects_stream_without_horizon_coverage():
+    event=PriceEvent("B","XAUUSD",100,1,.2,99.9,100.1,100.0,.1,.1)
+    consensus={"A":[nt("A",0,190,100.5)]}
+    assert passive_markout(event,[],consensus,horizon_ms=100,consensus_min_sources=1) is None
 
 
 def test_consensus_rejects_stale_future_quotes():
@@ -131,5 +148,5 @@ def test_stale_entry_quote_age_is_bounded():
     from regime.microstructure.lead_lag import passive_stale_markout
     leader=PriceEvent("A","XAUUSD",2000,1,.2,100,100.2,100.1,.1,.1)
     follower=[nt("B",0,500,99.9)]
-    consensus={"A":[nt("A",0,2100,100.5)],"B":[nt("B",1,2100,100.5)]}
+    consensus={"A":[nt("A",0,2099,100.5),nt("A",1,2101,100.5)],"B":[nt("B",1,2099,100.5),nt("B",2,2101,100.5)]}
     assert passive_stale_markout(leader,"B",follower,consensus,horizon_ms=100,max_entry_quote_age_ms=1000) is None
