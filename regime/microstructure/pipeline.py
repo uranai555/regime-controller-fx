@@ -39,6 +39,8 @@ def analyze_streams(
     stats: list[PairLagStats] = []
     stability: list[PairStability] = []
     markouts_by_target = {sid: [] for sid in streams}
+    markouts_by_pair: dict[tuple[str, str], list] = {}
+
     for leader, leader_events in events.items():
         for follower, follower_events in events.items():
             if leader == follower:
@@ -53,6 +55,7 @@ def analyze_streams(
                 bootstrap_resamples=bootstrap_resamples,
             ))
 
+            pair_markouts = []
             # Economic evaluation must be ex ante: once this ordered pair is
             # identified as leader->follower, evaluate every eligible leader
             # event. Conditioning markouts on a later same-direction follower
@@ -67,10 +70,15 @@ def analyze_streams(
                         max_entry_quote_age_ms=max_entry_quote_age_ms,
                     )
                     if m is not None:
+                        pair_markouts.append(m)
+                        # Broker fingerprint remains a descriptive target-level
+                        # aggregate. Execution gating below retains pair identity.
                         markouts_by_target[follower].append(m)
+            markouts_by_pair[(leader, follower)] = pair_markouts
+
     fps = [build_fingerprint(sid, ticks, stats, markouts_by_target[sid]) for sid, ticks in streams.items()]
     scenarios = default_scenarios(commission_points=commission_points, cashback_points=cashback_points)
-    stress = {sid: stress_markouts(markouts, scenarios) for sid, markouts in markouts_by_target.items()}
+    stress = {pair: stress_markouts(markouts, scenarios) for pair, markouts in markouts_by_pair.items()}
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     write_lag_matrix(out / "broker_lag_matrix.csv", stats)
