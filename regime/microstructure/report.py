@@ -67,6 +67,7 @@ def choose_verdict(
     stability: Sequence[PairStability] | None = None,
     conservative_scenario: str = "slippage_1.0x_spread",
     min_stable_window_share: float = 0.60,
+    min_lag_consistent_window_share: float = 0.80,
 ) -> str:
     if len(fps) < 2 or any(fp.ticks < min_ticks for fp in fps):
         return "DATA_INSUFFICIENT"
@@ -86,6 +87,7 @@ def choose_verdict(
         row for row in stability
         if row.windows >= 2
         and row.positive_median_window_share >= min_stable_window_share
+        and row.lag_consistent_window_share >= min_lag_consistent_window_share
         and row.lag_median_bootstrap_lo_ms is not None
         and row.lag_median_bootstrap_lo_ms > 0
         and (row.leader, row.follower) in stressed_positive
@@ -119,10 +121,17 @@ def write_markdown_report(
     for s in stats:
         lines.append(f"| {s.leader} | {s.follower} | {s.leader_events} | {s.match_rate:.1%} | {s.median_lag_ms:.1f} | {s.p95_lag_ms:.1f} | {s.positive_lag_share:.1%} |")
     if stability:
-        lines += ["", "## Stability / bootstrap", "", "| Pair | Windows | Positive median-window share | Median window lag ms | Bootstrap median CI ms |", "|---|---:|---:|---:|---:|"]
+        lines += [
+            "", "## Stability / bootstrap", "",
+            "| Pair | Windows | Positive-window share | Lag-consistent-window share | Median window lag ms | Bootstrap median CI ms |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
         for s in stability:
             ci = "n/a" if s.lag_median_bootstrap_lo_ms is None else f"[{s.lag_median_bootstrap_lo_ms:.1f}, {s.lag_median_bootstrap_hi_ms:.1f}]"
-            lines.append(f"| {s.leader}→{s.follower} | {s.windows} | {s.positive_median_window_share:.1%} | {s.median_window_lag_ms:.1f} | {ci} |")
+            lines.append(
+                f"| {s.leader}→{s.follower} | {s.windows} | {s.positive_median_window_share:.1%} | "
+                f"{s.lag_consistent_window_share:.1%} | {s.median_window_lag_ms:.1f} | {ci} |"
+            )
     if stress:
         lines += ["", "## Friction / cashback stress", "", "Gross markout already uses executable bid/ask. The slippage term below is an additional adverse-fill stress.", "", "| Leader | Follower | Scenario | N | Mean net pts | Median net pts | Positive rate | P05 | P95 |", "|---|---|---|---:|---:|---:|---:|---:|---:|"]
         for (leader, follower), rows in sorted(stress.items()):
