@@ -100,12 +100,7 @@ def consensus_mid_at(
     max_age_ms: int = 250,
     min_sources: int = 2,
 ) -> float | None:
-    """Fresh multi-source consensus at or before ``t_ms``.
-
-    A quote older than ``max_age_ms`` is excluded so an ended/stalled stream is
-    never reused as a future-horizon price. This generic helper is inclusive at
-    ``t_ms``; markout functions use the stricter horizon helper below.
-    """
+    """Fresh multi-source consensus at or before ``t_ms``."""
     if max_age_ms < 0 or min_sources <= 0:
         raise ValueError("max_age_ms must be >=0 and min_sources must be >0")
     mids = []
@@ -127,14 +122,14 @@ def consensus_mid_before_horizon(
 
     Quotes stamped exactly at the horizon millisecond are excluded because
     ``GetTickCount`` cannot order sub-millisecond events across terminals. A
-    stream is also excluded unless its capture extends to or beyond the horizon;
-    this prevents an EOF/stalled feed from masquerading as a valid future price.
+    stream must also contain evidence strictly *after* the horizon; an exact-ms
+    final tick cannot prove the capture continued through the true horizon.
     """
     if max_age_ms < 0 or min_sources <= 0:
         raise ValueError("max_age_ms must be >=0 and min_sources must be >0")
     mids = []
     for ticks in streams.values():
-        if not ticks or ticks[-1].t_host_ms < t_ms:
+        if not ticks or ticks[-1].t_host_ms <= t_ms:
             continue
         tick = tick_strictly_before(ticks, t_ms)
         if tick is not None and 0 <= t_ms - tick.t_host_ms <= max_age_ms:
