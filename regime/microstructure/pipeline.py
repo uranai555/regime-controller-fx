@@ -44,25 +44,30 @@ def analyze_streams(
             if leader == follower:
                 continue
             matches = match_events(leader_events, follower_events)
-            stats.append(summarize_matches(leader, follower, len(leader_events), matches))
+            pair_stat = summarize_matches(leader, follower, len(leader_events), matches)
+            stats.append(pair_stat)
             stability.append(summarize_pair_stability(
                 leader, follower, matches,
                 window_ms=stability_window_ms,
                 min_events_per_window=stability_min_events,
                 bootstrap_resamples=bootstrap_resamples,
             ))
-            for match in matches:
-                if match.lag_ms <= 0:
-                    continue
-                m = passive_stale_markout(
-                    match.leader, follower, streams[follower], streams,
-                    horizon_ms=markout_horizon_ms,
-                    consensus_max_age_ms=consensus_max_age_ms,
-                    consensus_min_sources=consensus_min_sources,
-                    max_entry_quote_age_ms=max_entry_quote_age_ms,
-                )
-                if m is not None:
-                    markouts_by_target[follower].append(m)
+
+            # Economic evaluation must be ex ante: once this ordered pair is
+            # identified as leader->follower, evaluate every eligible leader
+            # event. Conditioning markouts on a later same-direction follower
+            # match would discard failed/reversed signals and bias EV upward.
+            if pair_stat.matched_events and pair_stat.median_lag_ms > 0:
+                for leader_event in leader_events:
+                    m = passive_stale_markout(
+                        leader_event, follower, streams[follower], streams,
+                        horizon_ms=markout_horizon_ms,
+                        consensus_max_age_ms=consensus_max_age_ms,
+                        consensus_min_sources=consensus_min_sources,
+                        max_entry_quote_age_ms=max_entry_quote_age_ms,
+                    )
+                    if m is not None:
+                        markouts_by_target[follower].append(m)
     fps = [build_fingerprint(sid, ticks, stats, markouts_by_target[sid]) for sid, ticks in streams.items()]
     scenarios = default_scenarios(commission_points=commission_points, cashback_points=cashback_points)
     stress = {sid: stress_markouts(markouts, scenarios) for sid, markouts in markouts_by_target.items()}
