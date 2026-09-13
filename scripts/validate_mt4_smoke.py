@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from statistics import median
+
+# Support both `python -m scripts.validate_mt4_smoke` and direct execution from
+# a clean checkout without requiring an editable package install first.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from regime.microstructure.clock import align_stream_wrap_epochs
 from regime.microstructure.ingest import RECORD_SIZE, load_ticks
@@ -48,11 +55,27 @@ def main() -> int:
 
     failures: list[str] = []
     streams = {}
+    seen_aliases: set[str] = set()
+    seen_files: dict[Path, str] = {}
+
     for alias, path in args.source:
+        if alias in seen_aliases:
+            failures.append(f"duplicate source alias: {alias}")
+            continue
+        seen_aliases.add(alias)
+
         if not path.exists():
             failures.append(f"{alias}: file not found: {path}")
             continue
-        size = path.stat().st_size
+        resolved = path.resolve()
+        if resolved in seen_files:
+            failures.append(
+                f"{alias}: duplicate capture file also used by {seen_files[resolved]}: {resolved}"
+            )
+            continue
+        seen_files[resolved] = alias
+
+        size = resolved.stat().st_size
         if size < HEADER_SIZE + RECORD_SIZE:
             failures.append(f"{alias}: file too small ({size} bytes)")
             continue
@@ -60,7 +83,7 @@ def main() -> int:
             failures.append(f"{alias}: binary size violates 8+N*{RECORD_SIZE} contract ({size} bytes)")
             continue
         try:
-            ticks = load_ticks(path, source_id=alias, symbol=args.symbol)
+            ticks = load_ticks(resolved, source_id=alias, symbol=args.symbol)
         except Exception as exc:
             failures.append(f"{alias}: parser rejected file: {exc}")
             continue
@@ -76,8 +99,11 @@ def main() -> int:
         streams[alias] = ticks
         print(
             f"{alias}: ticks={len(ticks)} duration_s={duration_ms/1000:.1f} "
-            f"median_spread_pts={med_spread:.3f} file={path}"
+            f"median_spread_pts={med_spread:.3f} file={resolved}"
         )
+
+    if len(streams) < 2 and not failures:
+        failures.append("fewer than two distinct valid capture streams")
 
     if len(streams) >= 2:
         try:
