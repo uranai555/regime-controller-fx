@@ -98,13 +98,40 @@ def consensus_mid_at(
     """Fresh multi-source consensus at or before ``t_ms``.
 
     A quote older than ``max_age_ms`` is excluded so an ended/stalled stream is
-    never reused as a future-horizon price.
+    never reused as a future-horizon price. This generic helper is inclusive at
+    ``t_ms``; markout functions use the stricter horizon helper below.
     """
     if max_age_ms < 0 or min_sources <= 0:
         raise ValueError("max_age_ms must be >=0 and min_sources must be >0")
     mids = []
     for ticks in streams.values():
         tick = tick_at_or_before(ticks, t_ms)
+        if tick is not None and 0 <= t_ms - tick.t_host_ms <= max_age_ms:
+            mids.append(tick.mid)
+    return median(mids) if len(mids) >= min_sources else None
+
+
+def consensus_mid_before_horizon(
+    streams: Mapping[str, Sequence[NormalizedTick]],
+    t_ms: int,
+    *,
+    max_age_ms: int = 250,
+    min_sources: int = 2,
+) -> float | None:
+    """Conservative consensus for an event-relative future horizon.
+
+    Quotes stamped exactly at the horizon millisecond are excluded because
+    ``GetTickCount`` cannot order sub-millisecond events across terminals. A
+    stream is also excluded unless its capture extends to or beyond the horizon;
+    this prevents an EOF/stalled feed from masquerading as a valid future price.
+    """
+    if max_age_ms < 0 or min_sources <= 0:
+        raise ValueError("max_age_ms must be >=0 and min_sources must be >0")
+    mids = []
+    for ticks in streams.values():
+        if not ticks or ticks[-1].t_host_ms < t_ms:
+            continue
+        tick = tick_strictly_before(ticks, t_ms)
         if tick is not None and 0 <= t_ms - tick.t_host_ms <= max_age_ms:
             mids.append(tick.mid)
     return median(mids) if len(mids) >= min_sources else None
@@ -122,7 +149,7 @@ class PassiveMarkout:
 
 
 def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int, consensus_max_age_ms: int = 250, consensus_min_sources: int = 2) -> PassiveMarkout | None:
-    future_mid = consensus_mid_at(
+    future_mid = consensus_mid_before_horizon(
         consensus_streams,
         event.t_ms + horizon_ms,
         max_age_ms=consensus_max_age_ms,
@@ -147,7 +174,7 @@ def passive_stale_markout(leader_event: PriceEvent, target_source_id: str, targe
     target_tick = tick_strictly_before(target_ticks, leader_event.t_ms)
     if target_tick is None or leader_event.t_ms - target_tick.t_host_ms > max_entry_quote_age_ms:
         return None
-    future_mid = consensus_mid_at(
+    future_mid = consensus_mid_before_horizon(
         consensus_streams,
         leader_event.t_ms + horizon_ms,
         max_age_ms=consensus_max_age_ms,
