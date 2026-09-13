@@ -12,6 +12,7 @@ from .lead_lag import PairLagStats
 from .stability import PairStability
 
 VERDICTS = {"NO_EDGE", "OBSERVATIONAL_EDGE_ONLY", "CANDIDATE_FOR_EXECUTION_PROBE", "DATA_INSUFFICIENT"}
+PairKey = tuple[str, str]
 
 
 def write_lag_matrix(path: str | Path, stats: Sequence[PairLagStats]) -> None:
@@ -35,10 +36,18 @@ def write_fingerprints(path: str | Path, fps: Sequence[BrokerFingerprint]) -> No
         json.dump([fp.to_dict() for fp in fps], f, indent=2, ensure_ascii=False)
 
 
-def write_cost_stress(path: str | Path, stress: Mapping[str, Sequence[StressResult]]) -> None:
+def write_cost_stress(path: str | Path, stress: Mapping[PairKey, Sequence[StressResult]]) -> None:
+    """Write pair-keyed economic stress so unrelated edges can never be joined."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    payload = {broker: [row.to_dict() for row in rows] for broker, rows in stress.items()}
+    payload = [
+        {
+            "leader": leader,
+            "follower": follower,
+            "scenarios": [row.to_dict() for row in rows],
+        }
+        for (leader, follower), rows in sorted(stress.items())
+    ]
     with p.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
@@ -54,7 +63,7 @@ def choose_verdict(
     fps: Sequence[BrokerFingerprint],
     *,
     min_ticks: int = 100_000,
-    stress: Mapping[str, Sequence[StressResult]] | None = None,
+    stress: Mapping[PairKey, Sequence[StressResult]] | None = None,
     stability: Sequence[PairStability] | None = None,
     conservative_scenario: str = "slippage_1.0x_spread",
     min_stable_window_share: float = 0.60,
@@ -66,16 +75,20 @@ def choose_verdict(
         return "NO_EDGE"
     if stress is None or stability is None:
         return "OBSERVATIONAL_EDGE_ONLY"
-    stressed_positive = set()
-    for broker, rows in stress.items():
+
+    stressed_positive: set[PairKey] = set()
+    for pair, rows in stress.items():
         for row in rows:
             if row.scenario == conservative_scenario and row.observations > 0 and row.mean_net_points > 0:
-                stressed_positive.add(broker)
+                stressed_positive.add(pair)
+
     stable_pairs = [
         row for row in stability
         if row.windows >= 2
         and row.positive_median_window_share >= min_stable_window_share
-        and row.follower in stressed_positive
+        and row.lag_median_bootstrap_lo_ms is not None
+        and row.lag_median_bootstrap_lo_ms > 0
+        and (row.leader, row.follower) in stressed_positive
     ]
     return "CANDIDATE_FOR_EXECUTION_PROBE" if stable_pairs else "OBSERVATIONAL_EDGE_ONLY"
 
@@ -85,7 +98,7 @@ def write_markdown_report(
     fps: Sequence[BrokerFingerprint],
     stats: Sequence[PairLagStats],
     *,
-    stress: Mapping[str, Sequence[StressResult]] | None = None,
+    stress: Mapping[PairKey, Sequence[StressResult]] | None = None,
     stability: Sequence[PairStability] | None = None,
     verdict: str | None = None,
 ) -> str:
@@ -111,10 +124,10 @@ def write_markdown_report(
             ci = "n/a" if s.lag_median_bootstrap_lo_ms is None else f"[{s.lag_median_bootstrap_lo_ms:.1f}, {s.lag_median_bootstrap_hi_ms:.1f}]"
             lines.append(f"| {s.leader}→{s.follower} | {s.windows} | {s.positive_median_window_share:.1%} | {s.median_window_lag_ms:.1f} | {ci} |")
     if stress:
-        lines += ["", "## Friction / cashback stress", "", "Gross markout already uses executable bid/ask. The slippage term below is an additional adverse-fill stress.", "", "| Broker | Scenario | N | Mean net pts | Median net pts | Positive rate | P05 | P95 |", "|---|---|---:|---:|---:|---:|---:|---:|"]
-        for broker, rows in stress.items():
+        lines += ["", "## Friction / cashback stress", "", "Gross markout already uses executable bid/ask. The slippage term below is an additional adverse-fill stress.", "", "| Leader | Follower | Scenario | N | Mean net pts | Median net pts | Positive rate | P05 | P95 |", "|---|---|---|---:|---:|---:|---:|---:|---:|"]
+        for (leader, follower), rows in sorted(stress.items()):
             for r in rows:
-                lines.append(f"| {broker} | {r.scenario} | {r.observations} | {r.mean_net_points:.3f} | {r.median_net_points:.3f} | {r.positive_rate:.1%} | {r.p05_net_points:.3f} | {r.p95_net_points:.3f} |")
+                lines.append(f"| {leader} | {follower} | {r.scenario} | {r.observations} | {r.mean_net_points:.3f} | {r.median_net_points:.3f} | {r.positive_rate:.1%} | {r.p05_net_points:.3f} | {r.p95_net_points:.3f} |")
     lines += ["", "## Gate", "", "Do not move to live/min-lot probing until data, lead/lag stability and friction-stressed economic gates are satisfied.", ""]
     text = "\n".join(lines)
     p = Path(path)
