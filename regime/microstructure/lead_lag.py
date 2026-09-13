@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Mapping, Sequence
 
+from .clock import align_stream_wrap_epochs
 from .event_match import EventMatch, PriceEvent, detect_price_events, match_events
 from .schema import NormalizedTick
 
@@ -50,6 +51,10 @@ def summarize_matches(leader: str, follower: str, leader_event_count: int, match
 
 
 def pairwise_lag_matrix(streams: Mapping[str, Sequence[NormalizedTick]], **event_kwargs) -> list[PairLagStats]:
+    # Public callers commonly pass independently loaded MT4 logs. Normalize the
+    # uint32 GetTickCount wrap generation here as well as in the full pipeline so
+    # a rollover cannot create an apparent ~49.7-day cross-broker lag.
+    streams = align_stream_wrap_epochs(streams)
     events = {sid: detect_price_events(ticks, **event_kwargs) for sid, ticks in streams.items()}
     out: list[PairLagStats] = []
     for leader, lev in events.items():
