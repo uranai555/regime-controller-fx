@@ -34,9 +34,14 @@ def build_fingerprint(broker_id: str, ticks: Sequence[NormalizedTick], pair_stat
     outgoing = [s for s in pair_stats if s.leader == broker_id]
     incoming = [s for s in pair_stats if s.follower == broker_id and s.matched_events]
     positive_outgoing = [s for s in outgoing if s.median_lag_ms > 0]
+    positive_incoming = [s for s in incoming if s.median_lag_ms > 0]
     leader_share = (len(positive_outgoing) / len(outgoing)) if outgoing else 0.0
-    response_lags = [s.median_lag_ms for s in incoming]
-    response_p95s = [s.p95_lag_ms for s in incoming]
+
+    # Directed pair statistics are signed. A negative incoming lag means this
+    # broker actually led the nominal leader in that reverse row, so it must not
+    # be interpreted as this broker's response latency.
+    response_lags = [s.median_lag_ms for s in positive_incoming]
+    response_p95s = [s.p95_lag_ms for s in positive_incoming]
     marks = [m.gross_markout_points for m in markouts_100ms]
     return BrokerFingerprint(
         broker_id=broker_id,
