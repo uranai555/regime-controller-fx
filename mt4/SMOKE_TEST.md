@@ -32,20 +32,26 @@ Logs are written through `FILE_COMMON` to the MT4 shared Common/Files directory.
 
 ## 3. Validate the real MQL4-produced binary files
 
-From the repo environment run:
+Run the validator from the repository root. Module invocation is preferred and works in a clean checkout without first installing the package:
 
 ```bash
-python scripts/validate_mt4_smoke.py \
+python -m scripts.validate_mt4_smoke \
   --source broker_a="/path/to/microstructure_broker_a_XAUUSD_....bin" \
   --source broker_b="/path/to/microstructure_broker_b_XAUUSD_....bin" \
   --symbol XAUUSD \
   --output-dir output/microstructure-smoke
 ```
 
-On Windows/PowerShell, quote paths normally:
+Direct script execution is also supported:
+
+```bash
+python scripts/validate_mt4_smoke.py --help
+```
+
+On Windows/PowerShell:
 
 ```powershell
-python scripts/validate_mt4_smoke.py `
+python -m scripts.validate_mt4_smoke `
   --source "broker_a=C:\...\Common\Files\microstructure_broker_a_XAUUSD_....bin" `
   --source "broker_b=C:\...\Common\Files\microstructure_broker_b_XAUUSD_....bin" `
   --symbol XAUUSD `
@@ -54,6 +60,8 @@ python scripts/validate_mt4_smoke.py `
 
 The validator checks:
 
+- at least two distinct source aliases
+- at least two distinct resolved capture files (symlink/path aliases cannot fake a second broker)
 - real file exists
 - `8 + N*84` binary layout
 - schema/header/parser compatibility
@@ -99,13 +107,13 @@ Only if all are true:
 
 ```text
 MetaEditor compile: 0 errors / 0 warnings
-validate_mt4_smoke.py: SMOKE_PASS
+validate_mt4_smoke: SMOKE_PASS
 manual instrument/host checks: PASS
 ```
 
 ### BLOCKED_MT4
 
-Any compile problem, parser/schema mismatch, write failure, invalid sequence, or missing output.
+Any compile problem, parser/schema mismatch, write failure, invalid sequence, duplicate capture file, or missing output.
 
 ### BLOCKED_ENV
 
