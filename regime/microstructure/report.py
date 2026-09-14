@@ -68,7 +68,10 @@ def choose_verdict(
     conservative_scenario: str = "slippage_1.0x_spread",
     min_stable_window_share: float = 0.60,
     min_lag_consistent_window_share: float = 0.80,
+    min_stress_observations: int = 30,
 ) -> str:
+    if min_stress_observations < 2:
+        raise ValueError("min_stress_observations must be >= 2")
     if len(fps) < 2 or any(fp.ticks < min_ticks for fp in fps):
         return "DATA_INSUFFICIENT"
     evs = [fp.theoretical_ev_100ms_points for fp in fps if fp.theoretical_ev_100ms_points is not None]
@@ -80,7 +83,13 @@ def choose_verdict(
     stressed_positive: set[PairKey] = set()
     for pair, rows in stress.items():
         for row in rows:
-            if row.scenario == conservative_scenario and row.observations > 0 and row.mean_net_points > 0:
+            if (
+                row.scenario == conservative_scenario
+                and row.observations >= min_stress_observations
+                and row.mean_net_points > 0
+                and row.mean_net_ci95_lo_points is not None
+                and row.mean_net_ci95_lo_points > 0
+            ):
                 stressed_positive.add(pair)
 
     stable_pairs = [
@@ -133,10 +142,19 @@ def write_markdown_report(
                 f"{s.lag_consistent_window_share:.1%} | {s.median_window_lag_ms:.1f} | {ci} |"
             )
     if stress:
-        lines += ["", "## Friction / cashback stress", "", "Gross markout already uses executable bid/ask. The slippage term below is an additional adverse-fill stress.", "", "| Leader | Follower | Scenario | N | Mean net pts | Median net pts | Positive rate | P05 | P95 |", "|---|---|---|---:|---:|---:|---:|---:|---:|"]
+        lines += [
+            "", "## Friction / cashback stress", "",
+            "Gross markout already uses executable bid/ask. The slippage term below is an additional adverse-fill stress.", "",
+            "| Leader | Follower | Scenario | N | Mean net pts | Mean 95% CI lower | Median net pts | Positive rate | P05 | P95 |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
         for (leader, follower), rows in sorted(stress.items()):
             for r in rows:
-                lines.append(f"| {leader} | {follower} | {r.scenario} | {r.observations} | {r.mean_net_points:.3f} | {r.median_net_points:.3f} | {r.positive_rate:.1%} | {r.p05_net_points:.3f} | {r.p95_net_points:.3f} |")
+                lo = "n/a" if r.mean_net_ci95_lo_points is None else f"{r.mean_net_ci95_lo_points:.3f}"
+                lines.append(
+                    f"| {leader} | {follower} | {r.scenario} | {r.observations} | {r.mean_net_points:.3f} | "
+                    f"{lo} | {r.median_net_points:.3f} | {r.positive_rate:.1%} | {r.p05_net_points:.3f} | {r.p95_net_points:.3f} |"
+                )
     lines += ["", "## Gate", "", "Do not move to live/min-lot probing until data, lead/lag stability and friction-stressed economic gates are satisfied.", ""]
     text = "\n".join(lines)
     p = Path(path)
