@@ -6,7 +6,7 @@ from regime.microstructure.event_match import PriceEvent, estimate_event_lag
 from regime.microstructure.fingerprint import BrokerFingerprint
 from regime.microstructure.friction import StressResult
 from regime.microstructure.ingest import encode_header, encode_record
-from regime.microstructure.lead_lag import passive_markout
+from regime.microstructure.lead_lag import passive_markout, passive_stale_markout
 from regime.microstructure.report import choose_verdict
 from regime.microstructure.schema import NormalizedTick, RawTick
 from regime.microstructure.stability import PairStability, summarize_pair_stability
@@ -55,9 +55,32 @@ def test_close_events_preserve_exact_max_cardinality_alignment():
 
 def test_exact_horizon_final_tick_does_not_prove_future_coverage():
     event = pe("B", 100, 1)
-    consensus = {"A": [nt("A", 0, 199, 100.2), nt("A", 1, 200, 100.4)]}
+    consensus = {"A": [nt("A", 0, 99, 100.0), nt("A", 1, 199, 100.2), nt("A", 2, 200, 100.4)]}
     assert passive_markout(
         event, [], consensus, horizon_ms=100, consensus_min_sources=1
+    ) is None
+
+
+def test_absolute_broker_basis_does_not_create_markout_edge():
+    event = pe("B", 100, 1)
+    streams = {
+        "A": [nt("A", 0, 99, 120.0), nt("A", 1, 199, 120.0), nt("A", 2, 201, 120.0)],
+        "B": [nt("B", 0, 99, 100.0), nt("B", 1, 199, 100.0), nt("B", 2, 201, 100.0)],
+    }
+    result = passive_markout(event, [], streams, horizon_ms=100, consensus_min_sources=2)
+    assert result is not None
+    assert result.gross_markout_points == pytest.approx(-1.0)
+
+
+def test_same_ms_follower_update_rejects_stale_entry_markout():
+    leader = pe("A", 100, 1)
+    target = [nt("B", 0, 99, 100.0), nt("B", 1, 100, 100.3)]
+    streams = {
+        "A": [nt("A", 0, 99, 100.0), nt("A", 1, 199, 100.4), nt("A", 2, 201, 100.4)],
+        "B": [nt("B", 0, 99, 100.0), nt("B", 1, 100, 100.3), nt("B", 2, 199, 100.4), nt("B", 3, 201, 100.4)],
+    }
+    assert passive_stale_markout(
+        leader, "B", target, streams, horizon_ms=100, consensus_min_sources=2
     ) is None
 
 
@@ -88,7 +111,7 @@ def test_probe_verdict_requires_lag_consistent_windows():
         BrokerFingerprint("A", "XAUUSD", 100000, 10, 100, 2, .7, 30, 100, .6, 1.0),
         BrokerFingerprint("B", "XAUUSD", 100000, 10, 100, 2, .2, 30, 100, .6, 1.0),
     ]
-    positive = StressResult("slippage_1.0x_spread", 100, .4, .3, .6, -1, 2)
+    positive = StressResult("slippage_1.0x_spread", 100, .4, .3, .6, -1, 2, .1)
     shifted = PairStability(
         "A", "B", 100, 4, 1.0, 70, 35, 105, {},
         lag_consistent_window_share=0.5,
