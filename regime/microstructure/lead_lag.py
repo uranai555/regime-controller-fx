@@ -51,9 +51,6 @@ def summarize_matches(leader: str, follower: str, leader_event_count: int, match
 
 
 def pairwise_lag_matrix(streams: Mapping[str, Sequence[NormalizedTick]], **event_kwargs) -> list[PairLagStats]:
-    # Public callers commonly pass independently loaded MT4 logs. Normalize the
-    # uint32 GetTickCount wrap generation here as well as in the full pipeline so
-    # a rollover cannot create an apparent ~49.7-day cross-broker lag.
     streams = align_stream_wrap_epochs(streams)
     events = {sid: detect_price_events(ticks, **event_kwargs) for sid, ticks in streams.items()}
     out: list[PairLagStats] = []
@@ -93,6 +90,21 @@ def tick_strictly_before(ticks: Sequence[NormalizedTick], t_ms: int) -> Normaliz
     return best
 
 
+def tick_at_exact_time(ticks: Sequence[NormalizedTick], t_ms: int) -> NormalizedTick | None:
+    """Return any quote stamped exactly at t_ms using binary search."""
+    lo, hi = 0, len(ticks) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        value = ticks[mid].t_host_ms
+        if value < t_ms:
+            lo = mid + 1
+        elif value > t_ms:
+            hi = mid - 1
+        else:
+            return ticks[mid]
+    return None
+
+
 def consensus_mid_at(
     streams: Mapping[str, Sequence[NormalizedTick]],
     t_ms: int,
@@ -100,7 +112,7 @@ def consensus_mid_at(
     max_age_ms: int = 250,
     min_sources: int = 2,
 ) -> float | None:
-    """Fresh multi-source consensus at or before ``t_ms``."""
+    """Fresh multi-source absolute-price consensus, retained for diagnostics only."""
     if max_age_ms < 0 or min_sources <= 0:
         raise ValueError("max_age_ms must be >=0 and min_sources must be >0")
     mids = []
@@ -118,13 +130,7 @@ def consensus_mid_before_horizon(
     max_age_ms: int = 250,
     min_sources: int = 2,
 ) -> float | None:
-    """Conservative consensus for an event-relative future horizon.
-
-    Quotes stamped exactly at the horizon millisecond are excluded because
-    ``GetTickCount`` cannot order sub-millisecond events across terminals. A
-    stream must also contain evidence strictly *after* the horizon; an exact-ms
-    final tick cannot prove the capture continued through the true horizon.
-    """
+    """Fresh absolute-price consensus strictly before a horizon, for diagnostics."""
     if max_age_ms < 0 or min_sources <= 0:
         raise ValueError("max_age_ms must be >=0 and min_sources must be >0")
     mids = []
@@ -135,6 +141,41 @@ def consensus_mid_before_horizon(
         if tick is not None and 0 <= t_ms - tick.t_host_ms <= max_age_ms:
             mids.append(tick.mid)
     return median(mids) if len(mids) >= min_sources else None
+
+
+def consensus_move_before_horizon(
+    streams: Mapping[str, Sequence[NormalizedTick]],
+    start_ms: int,
+    end_ms: int,
+    *,
+    max_age_ms: int = 250,
+    min_sources: int = 2,
+) -> float | None:
+    """Median source-relative price move from before start to before end.
+
+    Absolute broker price levels are never mixed. Each source contributes only
+    its own midpoint change, eliminating persistent cross-broker quote bases from
+    theoretical markouts. Both endpoints must be fresh, and capture must continue
+    strictly past the horizon so exact-ms ordering cannot leak into the outcome.
+    """
+    if end_ms <= start_ms:
+        raise ValueError("end_ms must be greater than start_ms")
+    if max_age_ms < 0 or min_sources <= 0:
+        raise ValueError("max_age_ms must be >=0 and min_sources must be >0")
+    moves: list[float] = []
+    for ticks in streams.values():
+        if not ticks or ticks[-1].t_host_ms <= end_ms:
+            continue
+        start_tick = tick_strictly_before(ticks, start_ms)
+        end_tick = tick_strictly_before(ticks, end_ms)
+        if start_tick is None or end_tick is None:
+            continue
+        if start_ms - start_tick.t_host_ms > max_age_ms:
+            continue
+        if end_ms - end_tick.t_host_ms > max_age_ms:
+            continue
+        moves.append(end_tick.mid - start_tick.mid)
+    return median(moves) if len(moves) >= min_sources else None
 
 
 @dataclass(frozen=True)
@@ -148,16 +189,26 @@ class PassiveMarkout:
     entry_spread_points: float = 0.0
 
 
-def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int, consensus_max_age_ms: int = 250, consensus_min_sources: int = 2) -> PassiveMarkout | None:
-    future_mid = consensus_mid_before_horizon(
+def passive_markout(
+    event: PriceEvent,
+    source_ticks: Sequence[NormalizedTick],
+    consensus_streams: Mapping[str, Sequence[NormalizedTick]],
+    *,
+    horizon_ms: int,
+    consensus_max_age_ms: int = 250,
+    consensus_min_sources: int = 2,
+) -> PassiveMarkout | None:
+    move = consensus_move_before_horizon(
         consensus_streams,
+        event.t_ms,
         event.t_ms + horizon_ms,
         max_age_ms=consensus_max_age_ms,
         min_sources=consensus_min_sources,
     )
-    if future_mid is None:
+    if move is None:
         return None
-    gross = future_mid - event.ask if event.direction > 0 else event.bid - future_mid
+    fair_mid = event.mid + move
+    gross = fair_mid - event.ask if event.direction > 0 else event.bid - fair_mid
     return PassiveMarkout(
         source_id=event.source_id,
         event_t_ms=event.t_ms,
@@ -169,20 +220,39 @@ def passive_markout(event: PriceEvent, source_ticks: Sequence[NormalizedTick], c
     )
 
 
-def passive_stale_markout(leader_event: PriceEvent, target_source_id: str, target_ticks: Sequence[NormalizedTick], consensus_streams: Mapping[str, Sequence[NormalizedTick]], *, horizon_ms: int, consensus_max_age_ms: int = 250, consensus_min_sources: int = 2, max_entry_quote_age_ms: int = 1000) -> PassiveMarkout | None:
-    """Theoretical markout available on a follower's still-stale quote at leader-event time."""
+def passive_stale_markout(
+    leader_event: PriceEvent,
+    target_source_id: str,
+    target_ticks: Sequence[NormalizedTick],
+    consensus_streams: Mapping[str, Sequence[NormalizedTick]],
+    *,
+    horizon_ms: int,
+    consensus_max_age_ms: int = 250,
+    consensus_min_sources: int = 2,
+    max_entry_quote_age_ms: int = 1000,
+) -> PassiveMarkout | None:
+    """Theoretical markout on an unambiguously stale follower quote.
+
+    If the follower has any quote in the same GetTickCount millisecond as the
+    leader event, ordering is unknowable across terminals, so the opportunity is
+    rejected rather than assuming the older quote remained executable.
+    """
+    if tick_at_exact_time(target_ticks, leader_event.t_ms) is not None:
+        return None
     target_tick = tick_strictly_before(target_ticks, leader_event.t_ms)
     if target_tick is None or leader_event.t_ms - target_tick.t_host_ms > max_entry_quote_age_ms:
         return None
-    future_mid = consensus_mid_before_horizon(
+    move = consensus_move_before_horizon(
         consensus_streams,
+        leader_event.t_ms,
         leader_event.t_ms + horizon_ms,
         max_age_ms=consensus_max_age_ms,
         min_sources=consensus_min_sources,
     )
-    if future_mid is None:
+    if move is None:
         return None
-    gross = future_mid - target_tick.ask if leader_event.direction > 0 else target_tick.bid - future_mid
+    fair_mid = target_tick.mid + move
+    gross = fair_mid - target_tick.ask if leader_event.direction > 0 else target_tick.bid - fair_mid
     return PassiveMarkout(
         source_id=target_source_id,
         event_t_ms=leader_event.t_ms,
