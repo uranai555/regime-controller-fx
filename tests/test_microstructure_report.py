@@ -27,6 +27,10 @@ def stable_pair(leader="A", follower="B", share=.67, median_lag=40, lo=35, hi=45
     return PairStability(leader, follower, 100, 3, share, median_lag, lo, hi, {})
 
 
+def positive_stress(n=100, lo=.1):
+    return StressResult("slippage_1.0x_spread", n, .4, .3, .6, -1, 2, lo)
+
+
 def test_verdict_never_profitable(tmp_path: Path):
     fps = [fp("A"), fp("B", leader=.2, ev=.1)]
     verdict = choose_verdict(fps)
@@ -42,32 +46,40 @@ def test_insufficient_data_gate():
 
 def test_stress_and_stability_can_graduate_candidate():
     fps = [fp("A", leader=.7), fp("B", leader=.2, ev=.1)]
-    positive = StressResult("slippage_1.0x_spread", 100, .4, .3, .6, -1, 2)
-    stress = {("A", "B"): [positive]}
+    stress = {("A", "B"): [positive_stress()]}
     assert choose_verdict(fps, stress=stress, stability=[stable_pair()]) == "CANDIDATE_FOR_EXECUTION_PROBE"
 
 
 def test_stress_without_stable_windows_remains_observational():
     fps = [fp("A"), fp("B", leader=.2, ev=.1)]
-    positive = StressResult("slippage_1.0x_spread", 100, .4, .3, .6, -1, 2)
-    stress = {("A", "B"): [positive]}
+    stress = {("A", "B"): [positive_stress()]}
     unstable = stable_pair(share=.34, median_lag=-5, lo=-20, hi=10)
     assert choose_verdict(fps, stress=stress, stability=[unstable]) == "OBSERVATIONAL_EDGE_ONLY"
 
 
 def test_profitable_different_pair_cannot_graduate_stable_pair():
     fps = [fp("A"), fp("B", leader=.2, ev=.1), fp("C")]
-    positive = StressResult("slippage_1.0x_spread", 100, .4, .3, .6, -1, 2)
-    stress = {("C", "B"): [positive]}
+    stress = {("C", "B"): [positive_stress()]}
     assert choose_verdict(fps, stress=stress, stability=[stable_pair("A", "B")]) == "OBSERVATIONAL_EDGE_ONLY"
 
 
 def test_bootstrap_lower_bound_must_confirm_positive_lag():
     fps = [fp("A"), fp("B", leader=.2, ev=.1)]
-    positive = StressResult("slippage_1.0x_spread", 100, .4, .3, .6, -1, 2)
-    stress = {("A", "B"): [positive]}
+    stress = {("A", "B"): [positive_stress()]}
     inconclusive = stable_pair(lo=-2, hi=45)
     assert choose_verdict(fps, stress=stress, stability=[inconclusive]) == "OBSERVATIONAL_EDGE_ONLY"
+
+
+def test_stress_requires_mean_confidence_lower_bound_above_zero():
+    fps = [fp("A"), fp("B", leader=.2, ev=.1)]
+    stress = {("A", "B"): [positive_stress(lo=-0.01)]}
+    assert choose_verdict(fps, stress=stress, stability=[stable_pair()]) == "OBSERVATIONAL_EDGE_ONLY"
+
+
+def test_stress_requires_minimum_observation_count():
+    fps = [fp("A"), fp("B", leader=.2, ev=.1)]
+    stress = {("A", "B"): [positive_stress(n=1, lo=.3)]}
+    assert choose_verdict(fps, stress=stress, stability=[stable_pair()]) == "OBSERVATIONAL_EDGE_ONLY"
 
 
 def test_fingerprint_response_lag_ignores_negative_reverse_rows():
